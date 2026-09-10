@@ -78,6 +78,9 @@ interface HmiCopilotValue {
   pendingAction: PendingAction | null;
   selectedComponent: SelectedComponent | null;
   componentAction: ComponentAction;
+  /** Copilot reply text for the current Explain / Why Highlighted on the selected component, shown inline in the component panel. */
+  componentAnswer: string | null;
+  componentAnswerBusy: boolean;
   activePanel: ActivePanel;
   toast: Toast | null;
 
@@ -161,6 +164,8 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const [selectedComponent, setSelectedComponent] = useState<SelectedComponent | null>(null);
   const [componentAction, setComponentAction] = useState<ComponentAction>(null);
+  const [componentAnswer, setComponentAnswer] = useState<string | null>(null);
+  const [componentAnswerBusy, setComponentAnswerBusy] = useState(false);
   const [activePanel, setActivePanel] = useState<ActivePanel>(null);
   const [toast, setToast] = useState<Toast | null>(null);
 
@@ -299,6 +304,12 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
     setLastResponse(res);
     setConversation((c) => [...c, { role: "copilot", text: res.reply, at: Date.now(), routing: res.routing, source: res.source }]);
 
+    // Component Explain / Why Highlighted answers also render inline in the
+    // machine-view component panel, right where the operator clicked.
+    if (res.intent === "explain_component" || res.intent === "why_highlighted") {
+      setComponentAnswer(res.reply);
+    }
+
     if (res.screen) {
       screenLockedRef.current = true;
       setScreen(res.screen);
@@ -351,10 +362,9 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
         applyResponse(json);
       } catch {
         if (seq !== copilotSeqRef.current) return;
-        setConversation((c) => [
-          ...c,
-          { role: "copilot", text: "Central AI unavailable — using Edge Context Engine. The machine context on screen is live and correct.", at: Date.now() },
-        ]);
+        const msg = "Central AI unavailable — using the Edge Context Engine. The machine context on screen is live and correct.";
+        setConversation((c) => [...c, { role: "copilot", text: msg, at: Date.now() }]);
+        if (intent === "explain_component" || intent === "why_highlighted") setComponentAnswer(msg);
       } finally {
         if (seq === copilotSeqRef.current) {
           setCopilotBusy(false);
@@ -618,6 +628,8 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
       setReplayFrame(null);
       setSelectedComponent(null);
       setComponentAction(null);
+      setComponentAnswer(null);
+      setComponentAnswerBusy(false);
       setActivePanel(null);
       eventLogRef.current = [];
       screenLockedRef.current = false;
@@ -657,12 +669,16 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
   const selectComponent = useCallback((id: string, label: string) => {
     setSelectedComponent({ id, label });
     setComponentAction(null);
+    setComponentAnswer(null);
+    setComponentAnswerBusy(false);
     focusLockedRef.current = true;
     setMachineFocusAsset(id);
   }, []);
   const clearComponent = useCallback(() => {
     setSelectedComponent(null);
     setComponentAction(null);
+    setComponentAnswer(null);
+    setComponentAnswerBusy(false);
     // Hand the machine-view focus back to live state — the next SSE frame (or
     // the current payload) points it at the active alarm again.
     focusLockedRef.current = false;
@@ -673,10 +689,16 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
     async (id: string, label: string, mode: "explain" | "why") => {
       setSelectedComponent({ id, label });
       setComponentAction(mode);
+      setComponentAnswer(null);
+      setComponentAnswerBusy(true);
       focusLockedRef.current = true;
       setMachineFocusAsset(id);
       setConversation((c) => [...c, { role: "operator", text: mode === "why" ? `Why is the ${label} highlighted?` : `Explain the ${label}.`, at: Date.now() }]);
-      await postCopilot(mode === "why" ? "why_highlighted" : "explain_component", { componentId: id, componentLabel: label });
+      try {
+        await postCopilot(mode === "why" ? "why_highlighted" : "explain_component", { componentId: id, componentLabel: label });
+      } finally {
+        setComponentAnswerBusy(false);
+      }
     },
     [postCopilot]
   );
@@ -739,6 +761,8 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
     pendingAction,
     selectedComponent,
     componentAction,
+    componentAnswer,
+    componentAnswerBusy,
     activePanel,
     toast,
     ask,

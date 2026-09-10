@@ -27,13 +27,20 @@ function primEl(p: Prim, key: number) {
 
 export function MachineView({ context, deviceKind, focusAsset, alarmAsset, focusNote, machineState }: Props) {
   const stopped = machineState === "STOPPED" || machineState === "SAFE_MODE";
-  const { selectedComponent, componentAction, selectComponent, clearComponent, explainComponent } = useHmiCopilot();
+  const { selectedComponent, componentAction, componentAnswer, componentAnswerBusy, selectComponent, clearComponent, explainComponent } = useHmiCopilot();
   const scene = sceneFor(deviceKind);
   const [view, setView] = useState(DEFAULT_VIEW);
   const [hovered, setHovered] = useState<string | null>(null);
   const [dragging, setDragging] = useState<null | "orbit" | "pan">(null);
   const drag = useRef<{ x: number; y: number; pan: boolean } | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
+  const answerRef = useRef<HTMLDivElement>(null);
+
+  // When an Explain / Why answer arrives, make sure it is on screen (the button
+  // and the panel can sit low in a tall column).
+  useEffect(() => {
+    if (componentAnswer && answerRef.current) answerRef.current.scrollIntoView({ block: "nearest" });
+  }, [componentAnswer]);
 
   // Non-passive wheel listener so zoom does not scroll the page, without
   // blocking scroll elsewhere.
@@ -255,6 +262,23 @@ export function MachineView({ context, deviceKind, focusAsset, alarmAsset, focus
               Why highlighted?
             </button>
           </div>
+
+          {/* The Explain / Why answer renders right here, next to the buttons */}
+          {componentAction && (componentAnswerBusy || componentAnswer) && (
+            <div ref={answerRef} className="mt-2 rounded-[4px] border border-accent-line bg-accent-wash px-2 py-1.5">
+              <span className="text-[8px] font-bold uppercase tracking-[0.13em] text-accent-deep">
+                Copilot · {componentAction === "why" ? "Why highlighted" : "Explain component"}
+              </span>
+              {componentAnswerBusy ? (
+                <span className="mt-1 flex items-center gap-1.5 text-[10px] text-ink-faint">
+                  <span className="h-2.5 w-2.5 rounded-full border-2 border-[#cfe6e2] border-t-accent hmi-spin" />
+                  Reading component context…
+                </span>
+              ) : (
+                <p className="mt-1 max-h-32 overflow-y-auto text-[10.5px] leading-snug text-[#1f4b46]">{componentAnswer}</p>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>
