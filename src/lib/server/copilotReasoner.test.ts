@@ -73,6 +73,18 @@ test("explain_component for an unrelated component says it is not the flagged on
   assert.match(r.reply, /not the flagged component/i);
 });
 
+test("explain/why always return focusAssetId = the requested component (so the UI can pin the machine view to it)", async () => {
+  for (const intent of ["explain_component", "why_highlighted"] as const) {
+    const onAlarm = await runCopilot({ intent, componentId: "M-201-COUPLING", componentLabel: "Coupling / Driven Load" }, liveCtx("M-201"));
+    assert.equal(onAlarm.focusAssetId, "M-201-COUPLING", `${intent} on the alarm component`);
+    assert.ok(onAlarm.screen, `${intent} on the alarm component generates a subsystem screen`);
+
+    // a component that is NOT the alarm focus still gets focusAssetId pointed at it
+    const offAlarm = await runCopilot({ intent, componentId: "M-201-CS", componentLabel: "Current Sensor" }, liveCtx("M-201"));
+    assert.equal(offAlarm.focusAssetId, "M-201-CS", `${intent} on a non-alarm component`);
+  }
+});
+
 test("proposed control actions still return a guardrail decision, never execute", async () => {
   const r = await runCopilot({ intent: "propose_control_action", actionId: "STOP" }, liveCtx("P-101"));
   assert.ok(r.proposedAction);

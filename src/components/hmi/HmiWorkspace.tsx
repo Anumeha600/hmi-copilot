@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect } from "react";
 import type { MachineContext } from "@/lib/machineContext/model";
 import { HmiCopilotProvider, useHmiCopilot } from "@/context/HmiCopilotContext";
 import { MachineContextPanel } from "./MachineContextPanel";
@@ -20,6 +21,11 @@ function WorkspaceInner() {
   const modeToggleable = opMode === "AUTO" || opMode === "MANUAL";
 
   const activeStage = replayT != null ? 0 : goldenPath ? 3 : lastResponse?.screen ? 4 : alarm ? 2 : 1;
+
+  // Keep the browser tab in sync with the active machine (page metadata is static).
+  useEffect(() => {
+    if (machine?.name) document.title = `HMI Copilot — ${machine.name}`;
+  }, [machine?.name]);
 
   return (
     <div className="mx-auto max-w-[1400px] px-4 py-5">
@@ -115,6 +121,7 @@ function WorkspaceInner() {
               context={payload?.machineContext ?? PLACEHOLDER_CONTEXT}
               deviceKind={kind}
               focusAsset={machineFocusAsset}
+              alarmAsset={payload?.context.machineView.focusAssetId ?? null}
               focusNote={payload?.context.machineView.note ?? null}
             />
           </div>

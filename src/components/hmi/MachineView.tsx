@@ -8,7 +8,10 @@ import { useHmiCopilot } from "@/context/HmiCopilotContext";
 interface Props {
   context: MachineContext;
   deviceKind: string;
+  /** The component the machine view is currently spotlighting (operator selection or Copilot focus). */
   focusAsset: string | null;
+  /** The component the ACTIVE ALARM belongs to — always from live machine state, independent of the spotlight. */
+  alarmAsset: string | null;
   focusNote: string | null;
   machineState: "STARTING" | "RUNNING" | "STOPPED" | "SAFE_MODE";
 }
@@ -22,7 +25,7 @@ function primEl(p: Prim, key: number) {
   return <path key={key} d={p.d} />;
 }
 
-export function MachineView({ context, deviceKind, focusAsset, focusNote, machineState }: Props) {
+export function MachineView({ context, deviceKind, focusAsset, alarmAsset, focusNote, machineState }: Props) {
   const stopped = machineState === "STOPPED" || machineState === "SAFE_MODE";
   const { selectedComponent, componentAction, selectComponent, clearComponent, explainComponent } = useHmiCopilot();
   const scene = sceneFor(deviceKind);
@@ -129,11 +132,12 @@ export function MachineView({ context, deviceKind, focusAsset, focusNote, machin
             </g>
 
             {scene.components.map((c) => {
-              const isAlarm = focusAsset === c.id;
+              const isAlarm = alarmAsset === c.id;
               const isSel = selectedComponent?.id === c.id;
+              const isSpot = focusAsset === c.id && !isAlarm; // Copilot / golden-path spotlight, not the alarm itself
               const isHover = hovered === c.id;
-              const stroke = isAlarm ? "var(--warn)" : isSel ? "var(--accent)" : isHover ? "var(--ink)" : "#16232f";
-              const sw = isAlarm || isSel ? 1.6 : 1;
+              const stroke = isAlarm ? "var(--warn)" : isSel || isSpot ? "var(--accent)" : isHover ? "var(--ink)" : "#16232f";
+              const sw = isAlarm || isSel || isSpot ? 1.6 : 1;
               return (
                 <g
                   key={c.id}
@@ -141,7 +145,7 @@ export function MachineView({ context, deviceKind, focusAsset, focusNote, machin
                   style={{ cursor: "pointer" }}
                   stroke={stroke}
                   strokeWidth={sw}
-                  fill={isAlarm ? "var(--warn-wash)" : isSel ? "var(--accent-wash)" : "#eef2f3"}
+                  fill={isAlarm ? "var(--warn-wash)" : isSel || isSpot ? "var(--accent-wash)" : "#eef2f3"}
                   onClick={(e) => {
                     e.stopPropagation();
                     selectComponent(c.id, c.label);
@@ -210,7 +214,7 @@ export function MachineView({ context, deviceKind, focusAsset, focusNote, machin
             <div className="flex justify-between">
               <span className="text-ink-soft">Status</span>
               <span className={`font-semibold uppercase ${worstStatus(selComp) === "normal" ? "text-accent-deep" : worstStatus(selComp) === "critical" ? "text-critical" : "text-warn"}`}>
-                {worstStatus(selComp) === "normal" ? "Nominal" : focusAsset === selComp.id ? "Degraded" : worstStatus(selComp)}
+                {worstStatus(selComp) === "normal" ? "Nominal" : alarmAsset === selComp.id ? "Degraded" : worstStatus(selComp)}
               </span>
             </div>
             {selComp.pvIds.slice(0, 2).map((id) => (
@@ -221,12 +225,12 @@ export function MachineView({ context, deviceKind, focusAsset, focusNote, machin
             ))}
             <div className="flex justify-between">
               <span className="text-ink-soft">Related alarm</span>
-              <span className={focusAsset === selComp.id && alarm ? "font-semibold text-warn" : "text-ink-faint"}>
-                {focusAsset === selComp.id && alarm ? alarm.label : "None"}
+              <span className={alarmAsset === selComp.id && alarm ? "font-semibold text-warn" : "text-ink-faint"}>
+                {alarmAsset === selComp.id && alarm ? alarm.label : "None"}
               </span>
             </div>
           </div>
-          {focusAsset === selComp.id && focusNote && (
+          {alarmAsset === selComp.id && focusNote && (
             <p className="mt-1.5 rounded-[3px] bg-accent-wash px-2 py-1 text-[10px] text-[#1f4b46]">Copilot: {focusNote}.</p>
           )}
           <div className="mt-2 flex gap-1.5">

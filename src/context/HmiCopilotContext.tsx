@@ -167,6 +167,11 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
   const esRef = useRef<EventSource | null>(null);
   const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const screenLockedRef = useRef(false);
+  // Once the operator selects a component, or the Copilot points the machine
+  // view at one, that focus is operator-owned: live SSE telemetry frames must
+  // NOT reset it. Cleared only when the operator changes context (different
+  // component, device switch, panel close, return to live, new incident).
+  const focusLockedRef = useRef(false);
   const playRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const toastRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // The demo session — held in a ref (read from callbacks) + a version counter
@@ -174,6 +179,13 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
   const sessionRef = useRef<string>("");
   const eventLogRef = useRef<TimelineEvent[]>([]);
   const activePanelRef = useRef<ActivePanel>(null);
+  const payloadRef = useRef<HmiStreamPayload | null>(null);
+  // Monotonic id for Copilot requests — only the newest one may update the UI,
+  // so a slow earlier response can never clobber a later one.
+  const copilotSeqRef = useRef(0);
+  // Same protection for device switches: if two switches are in flight, only the
+  // most recent one's response is allowed to update the session / UI.
+  const deviceSeqRef = useRef(0);
   const [sessionVersion, setSessionVersion] = useState(0);
   useEffect(() => {
     activePanelRef.current = activePanel;
@@ -187,13 +199,19 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
 
   // ---- apply a fresh stream payload (from SSE or an action response) ----
   const applyPayload = useCallback((p: HmiStreamPayload) => {
+    payloadRef.current = p;
     setPayload(p);
     setDevices(p.devices);
     setActiveDeviceId(p.deviceId);
     setConnection("connected");
+    // Live machine state (telemetry / alarms / status) always updates.
+    // Screen and machine-view focus are UI state the operator/Copilot own —
+    // only follow the engine's default while nothing has taken them over.
     if (!screenLockedRef.current) {
       setScreen(p.context.defaultScreen);
       setScreenSource("engine");
+    }
+    if (!focusLockedRef.current) {
       setMachineFocusAsset(p.context.machineView.focusAssetId);
     }
   }, []);
@@ -286,7 +304,10 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
       setScreen(res.screen);
       setScreenSource("copilot");
     }
-    if (res.focusAssetId !== undefined && res.focusAssetId !== null) setMachineFocusAsset(res.focusAssetId);
+    if (res.focusAssetId !== undefined && res.focusAssetId !== null) {
+      focusLockedRef.current = true;
+      setMachineFocusAsset(res.focusAssetId);
+    }
 
     if (res.goldenPath) setActivePanel("golden-path");
     else if (res.openTimeTravel) setActivePanel("replay");
@@ -300,7 +321,10 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
       setGoldenStep(0);
       const step0 = res.goldenPath.steps[0];
       setHighlight(step0?.highlight ?? null);
-      if (step0?.highlight.machineAsset) setMachineFocusAsset(step0.highlight.machineAsset);
+      if (step0?.highlight.machineAsset) {
+        focusLockedRef.current = true;
+        setMachineFocusAsset(step0.highlight.machineAsset);
+      }
     }
     if (res.openTimeTravel && res.replay) {
       setReplay(res.replay);
@@ -312,6 +336,7 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
 
   const postCopilot = useCallback(
     async (intent: CopilotIntentName, extra?: Record<string, unknown>) => {
+      const seq = ++copilotSeqRef.current;
       setCopilotBusy(true);
       setBusyLabel(BUSY_LABEL[intent] ?? "Analyzing machine context…");
       try {
@@ -321,16 +346,20 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
           body: JSON.stringify({ intent, session: sessionRef.current, events: eventLogRef.current, workflow: activePanelRef.current, ...extra }),
         });
         const json = (await r.json()) as CopilotResponse & { replay?: ReplayData; ok: boolean };
+        if (seq !== copilotSeqRef.current) return; // a newer request has been issued — discard this one
         if (!json.ok) throw new Error("copilot error");
         applyResponse(json);
       } catch {
+        if (seq !== copilotSeqRef.current) return;
         setConversation((c) => [
           ...c,
           { role: "copilot", text: "Central AI unavailable — using Edge Context Engine. The machine context on screen is live and correct.", at: Date.now() },
         ]);
       } finally {
-        setCopilotBusy(false);
-        setBusyLabel(null);
+        if (seq === copilotSeqRef.current) {
+          setCopilotBusy(false);
+          setBusyLabel(null);
+        }
       }
     },
     [applyResponse]
@@ -455,7 +484,10 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
       const step = path.steps[index];
       if (!step) return;
       setHighlight(step.highlight);
-      if (step.highlight.machineAsset) setMachineFocusAsset(step.highlight.machineAsset);
+      if (step.highlight.machineAsset) {
+        focusLockedRef.current = true;
+        setMachineFocusAsset(step.highlight.machineAsset);
+      }
       if (step.screen) void postCopilot("generate_screen", { target: step.screen });
     },
     [postCopilot]
@@ -485,6 +517,7 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
     setHighlight(null);
     setActivePanel((p) => (p === "golden-path" ? null : p));
     screenLockedRef.current = false;
+    focusLockedRef.current = false;
     flashToast("Golden Path closed", "info");
   }, [flashToast]);
 
@@ -531,6 +564,7 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
     setReplayFrame(null);
     setActivePanel((p) => (p === "replay" ? null : p));
     screenLockedRef.current = Boolean(goldenPath);
+    focusLockedRef.current = Boolean(goldenPath);
     setScreenSource("engine");
     flashToast("Returned to live", "info");
   }, [goldenPath, stopPlay, flashToast]);
@@ -570,6 +604,7 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
   const setDevice = useCallback(
     async (id: string) => {
       if (id === activeDeviceId) return;
+      const seq = ++deviceSeqRef.current;
       stopPlay();
       setBusyLabel("Switching machine…");
       setCopilotBusy(true);
@@ -586,6 +621,10 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
       setActivePanel(null);
       eventLogRef.current = [];
       screenLockedRef.current = false;
+      focusLockedRef.current = false;
+      // Optimistic: the selector tracks the click immediately; the SSE stream
+      // reconciles from the authoritative session a moment later.
+      setActiveDeviceId(id);
       try {
         const r = await fetch("/api/hmi/action", {
           method: "POST",
@@ -593,6 +632,7 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
           body: JSON.stringify({ action: "set_device", deviceId: id, session: sessionRef.current }),
         });
         const json = (await r.json()) as { ok: boolean; feedback?: string; session?: string; payload?: HmiStreamPayload };
+        if (seq !== deviceSeqRef.current) return; // a newer switch has been requested — this response is stale
         if (json.ok) {
           if (json.payload) applyPayload(json.payload);
           adoptSession(json.session);
@@ -602,10 +642,12 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
           flashToast("Unable to switch machine.", "warn");
         }
       } catch {
-        flashToast("Unable to switch machine.", "warn");
+        if (seq === deviceSeqRef.current) flashToast("Unable to switch machine.", "warn");
       } finally {
-        setCopilotBusy(false);
-        setBusyLabel(null);
+        if (seq === deviceSeqRef.current) {
+          setCopilotBusy(false);
+          setBusyLabel(null);
+        }
       }
     },
     [activeDeviceId, stopPlay, applyPayload, adoptSession, flashToast]
@@ -615,17 +657,23 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
   const selectComponent = useCallback((id: string, label: string) => {
     setSelectedComponent({ id, label });
     setComponentAction(null);
+    focusLockedRef.current = true;
     setMachineFocusAsset(id);
   }, []);
   const clearComponent = useCallback(() => {
     setSelectedComponent(null);
     setComponentAction(null);
+    // Hand the machine-view focus back to live state — the next SSE frame (or
+    // the current payload) points it at the active alarm again.
+    focusLockedRef.current = false;
+    setMachineFocusAsset(payloadRef.current?.context.machineView.focusAssetId ?? null);
   }, []);
 
   const explainComponent = useCallback(
     async (id: string, label: string, mode: "explain" | "why") => {
       setSelectedComponent({ id, label });
       setComponentAction(mode);
+      focusLockedRef.current = true;
       setMachineFocusAsset(id);
       setConversation((c) => [...c, { role: "operator", text: mode === "why" ? `Why is the ${label} highlighted?` : `Explain the ${label}.`, at: Date.now() }]);
       await postCopilot(mode === "why" ? "why_highlighted" : "explain_component", { componentId: id, componentLabel: label });
@@ -639,6 +687,7 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
     (assetId?: string | null) => {
       const target = assetId ?? lastResponse?.focusAssetId ?? payload?.context.machineView.focusAssetId ?? null;
       if (target) {
+        focusLockedRef.current = true;
         setMachineFocusAsset(target);
         flashToast(`Machine view focused · ${payload?.context.machineView.focusLabel ?? "component"}`, "info");
       }

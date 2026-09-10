@@ -9,6 +9,7 @@ interface Props {
   context: MachineContext;
   deviceKind: string;
   focusAsset: string | null;
+  alarmAsset: string | null;
   focusNote: string | null;
 }
 
@@ -24,7 +25,7 @@ function fmt(value: number, unit: string): string {
   return `${value}${unit ? " " + unit : ""}`;
 }
 
-export function MachineContextPanel({ context, deviceKind, focusAsset, focusNote }: Props) {
+export function MachineContextPanel({ context, deviceKind, focusAsset, alarmAsset, focusNote }: Props) {
   const [tab, setTab] = useState<"values" | "tags" | "io">("values");
   const alarm = context.alarms.find((a) => a.state === "active");
   const ms = context.runtime.machineState;
@@ -87,7 +88,7 @@ export function MachineContextPanel({ context, deviceKind, focusAsset, focusNote
         <div className="rounded-[6px] border border-hairline px-3 py-2.5 text-[11px] text-ink-faint">No active alarms.</div>
       )}
 
-      <MachineView context={context} deviceKind={deviceKind} focusAsset={focusAsset} focusNote={focusNote} machineState={ms} />
+      <MachineView context={context} deviceKind={deviceKind} focusAsset={focusAsset} alarmAsset={alarmAsset} focusNote={focusNote} machineState={ms} />
 
       <div className="rounded-[6px] border border-hairline">
         <div className="flex border-b border-hairline-soft text-[9px] font-semibold uppercase tracking-[0.1em]">

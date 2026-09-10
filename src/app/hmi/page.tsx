@@ -1,7 +1,7 @@
 import { HmiWorkspace } from "@/components/hmi/HmiWorkspace";
 
 export const metadata = {
-  title: "HMI Copilot — Pump Station P-101",
+  title: "HMI Copilot",
 };
 
 export default function HmiPage() {
