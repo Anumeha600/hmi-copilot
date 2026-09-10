@@ -1,105 +1,95 @@
-# Deploying HMI COPILOT to Render
+# Deploying HMI COPILOT to Vercel
 
-HMI COPILOT is a full server-side Next.js 16 app — SSE (`/api/hmi/stream`),
-API routes, an in-process machine simulation, Time-Travel DVR, and server-side
-Groq access. It must run as a **Web Service**, never a static site.
+HMI COPILOT is a standard **Next.js 16 App Router** app — server Route Handlers,
+SSE (`/api/hmi/stream`), an in-process machine simulation, a Time-Travel DVR,
+and server-side Groq access. It deploys with **Vercel's zero-config Next.js
+support** — no `vercel.json`, no separate server.
 
-The same build runs locally and in production; all client API calls are
-relative paths, so no URL is hard-coded.
+The same build runs locally and in production; every client API call is a
+relative path, so no URL is hard-coded.
 
 ---
 
-## 1. Deploy to Render
+## 1. One-time setup
 
-**Option A — Blueprint (recommended)**
-
-1. Push this repo to GitHub/GitLab (branch `main`).
-2. Render dashboard → **New → Blueprint** → select the repo. Render reads
-   [`render.yaml`](render.yaml).
-3. When prompted, paste your **`GROQ_API_KEY`** value (it is declared
-   `sync: false`, so it is never stored in the repo).
-4. **Apply**. First build takes ~3–5 min.
-
-**Option B — Manual Web Service**
-
-1. Render → **New → Web Service** → connect the repo.
-2. Settings:
-   | Field | Value |
+1. Push this repo to GitHub — `https://github.com/Anumeha600/hmi-copilot` (branch `master`).
+2. In Vercel: **Add New → Project → Import** that repo.
+3. Framework preset: **Next.js** (auto-detected). Leave Build & Output settings at defaults:
+   | Setting | Value |
    |---|---|
-   | Runtime | Node |
-   | Build command | `npm install && npm run build` |
-   | Start command | `npm start` |
-   | Health check path | `/api/health` |
-   | Instance type | Free (or Starter for no spin-down) |
-3. Add environment variables (section 2), then **Create Web Service**.
+   | Build Command | `next build` (default) |
+   | Install Command | `npm install` (default) |
+   | Output | (Next.js, managed by Vercel) |
+   | Node.js Version | 22.x (from `package.json` `engines`) |
+4. **Environment Variables** (Project → Settings → Environment Variables), for
+   *Production* and *Preview*:
+   | Name | Value |
+   |---|---|
+   | `GROQ_API_KEY` | your Groq key (`gsk_…`) — paste it here, never in git |
+   | `GROQ_MODEL` | `openai/gpt-oss-120b` |
 
-## 2. Environment variables
+   Without `GROQ_API_KEY` the Copilot still works fully on its deterministic
+   edge engine; with it, conversational replies are phrased by Groq (routing
+   badge shows `Central AI →`). The key is read only in
+   `src/lib/server/copilotReasoner.ts` via `process.env` and is **never** sent
+   to the browser.
+5. **Deploy.** First build ~2–4 min.
 
-| Name | Required | Value |
-|---|---|---|
-| `GROQ_API_KEY` | optional | Your Groq key (`gsk_…`). Set in the Render dashboard only — never in git. Without it the Copilot still works fully on its deterministic edge engine; with it, conversational replies are phrased by Groq. |
-| `GROQ_MODEL` | optional | `openai/gpt-oss-120b` (the working model; the older `llama-3.3-70b-versatile` is 404 on current Groq). Falls back to this value if unset. |
-| `NODE_VERSION` | recommended | `22.11.0` (also pinned in `.node-version`). `better-sqlite3` has native prebuilds for Node 20/22. |
-| `NODE_ENV` | auto | `production` (Render sets this). |
+## 2. Public URL
 
-`PORT` is injected by Render automatically and `next start` binds it — do not set it.
+Vercel assigns `https://hmi-copilot.vercel.app` (or `hmi-copilot-<hash>.vercel.app`).
 
-**The key is server-side only.** It is read via `process.env.GROQ_API_KEY` in
-`src/lib/server/copilotReasoner.ts` and never sent to the browser. There is no
-`NEXT_PUBLIC_*` variable. Verified: `.next/static/**` contains no `gsk_`,
-`GROQ_API_KEY`, `GROQ_MODEL`, or `api.groq.com`.
-
-## 3. Build & start
-
-```
-Build:  npm install && npm run build
-Start:  npm start          # = next start, binds 0.0.0.0:$PORT
-```
-
-`npm start` runs the compiled production server. **Never** use `npm run dev` in production.
-
-## 4. Public URL
-
-After the deploy goes green, Render assigns `https://<service-name>.onrender.com`
-(shown at the top of the service page). The app is reachable at:
-
-- `https://<domain>/`      → 307 redirect to `/hmi`
-- `https://<domain>/hmi`   → the workspace
+- `https://<domain>/`     → 307 redirect to `/hmi`
+- `https://<domain>/hmi`  → the workspace (opens immediately, no login)
 - `https://<domain>/api/health` → `{"ok":true,"service":"HMI COPILOT"}`
 
-No login is required — it opens straight into HMI COPILOT.
+## 3. Redeploy
 
-## 5. Redeploy after changes
+Push to `master` → Vercel builds automatically. Or **Deployments → ⋯ → Redeploy**.
+Environment-variable changes require a redeploy (Vercel prompts).
 
-- **Blueprint / auto-deploy**: push to `main` → Render rebuilds automatically
-  (`autoDeploy: true`).
-- **Manual**: Render service page → **Manual Deploy → Deploy latest commit**.
-- Environment-variable changes trigger a redeploy on save.
+## 4. Local verification before pushing
 
-## 6. Demo limitations (by design)
+```
+npm test          # 34 passing
+npm run build     # compiles clean
+npm run dev       # http://localhost:3000/hmi
+# or production-equivalent:
+npm run build && npm start
+```
 
-- **Simulation only.** Every device (Pump P-101, Motor M-201, Conveyor C-301,
-  Compressor CP-401, Tank T-501) is a deterministic simulator in
-  `src/lib/machineContext/`. No real PLC/controller is connected and the UI
-  says so (`DEMO MODE · SIMULATED MACHINE`).
-- **State is per-instance and non-persistent.** The `hmiEngine` singleton and
-  its DVR live in the Node process. Each device seeds its incident on
-  construction, so a fresh deploy or a cold start (Free tier spins down after
-  ~15 min idle and cold-starts in ~30 s on the next request) begins from a
-  clean, reproducible scenario. This is intended for a demo.
-- **SQLite (`sensegrid.db`)** stores only *discrete live events* and is
-  best-effort: if the production filesystem is read-only the app logs a warning
-  and continues — the DVR's state frames and seeded incident timelines are
-  in-memory and unaffected. It is not required for any demo feature.
-- **Multiple instances**: if you scale beyond one instance, each has its own
-  simulation. Keep it at 1 instance for a coherent demo.
-- **`[ RUN INCIDENT ]`** in the header re-arms the current device's seeded
-  fault — useful for repeating the scenario live.
+## 5. Serverless notes (important for a demo)
 
-## 7. What to check on the live URL
+Vercel runs each Route Handler as a Node.js Function; there is no permanently
+running process and the filesystem is read-only. HMI COPILOT is built to cope:
 
-Open `https://<domain>/hmi` and confirm: page loads over HTTPS with no console
-errors; SSE connects (machine values tick once a second); all five devices load
-from the selector; START/STOP run through the Safety Guardrail dialog; Golden
-Path, Time Travel, and the interactive 3D view all respond; the Copilot answers
-(and, with `GROQ_API_KEY` set, shows a `central` routing badge).
+- **Simulation advances on read.** `hmiEngine` steps every device forward to
+  "now" on every snapshot/action call (`advance()`), so a cold or idle function
+  instance still serves coherent live values — it does not depend on a
+  background timer surviving between invocations.
+- **SSE** (`/api/hmi/stream`) streams for up to `maxDuration` (60 s) then the
+  browser's `EventSource` reconnects automatically; the reconnect re-syncs to
+  current state. Live telemetry keeps flowing.
+- **State is per-instance.** The `globalThis` engine singleton holds mutable
+  control state (running/stopped, mode, acked, armed incident). On Vercel Hobby
+  a low-traffic app normally runs one warm instance, so START/STOP, device
+  switching, `RUN INCIDENT`, etc. are consistent for a single operator. A cold
+  start re-seeds every device's incident deterministically — a clean demo
+  starting point. For a judged demo, one browser at a time gives perfectly
+  consistent state; if state ever looks out of sync, it self-heals on the next
+  SSE reconnect (seconds).
+- **SQLite (`better-sqlite3`)** is loaded lazily and is **entirely optional** —
+  it only persisted discrete events. On Vercel it can't write, so it's disabled
+  automatically (a one-line warning in the logs); Time Travel uses the
+  in-memory frame ring + seeded incident timeline + in-memory live events and
+  works unchanged. No external database is used or needed.
+
+## 6. What to check on the live URL
+
+Open `https://<domain>/hmi`: page loads over HTTPS, no console errors, SSE
+connects (values tick each second), all five devices load from the selector,
+START/STOP go through the Safety Guardrail dialog and change machine state,
+Golden Path / Time Travel / interactive 3D respond, `RUN INCIDENT` and the
+AUTO/MANUAL toggle work, and the Copilot answers (with `GROQ_API_KEY` set, the
+routing badge shows `Central AI →` on "why" questions). Confirm the Network tab
+shows only same-origin `/api/*` requests and no `localhost`.

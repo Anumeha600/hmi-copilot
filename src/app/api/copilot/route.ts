@@ -3,6 +3,8 @@ import { runCopilot, type CopilotRequest } from "@/lib/server/copilotReasoner";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// The Groq phrasing call can take a few seconds; give the function headroom.
+export const maxDuration = 30;
 
 const VALID_INTENTS = new Set([
   "explain_event",

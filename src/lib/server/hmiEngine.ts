@@ -78,6 +78,8 @@ class HmiEngine {
   private listeners = new Set<Listener>();
   private current!: HmiStreamPayload;
   private timer: ReturnType<typeof setInterval> | null = null;
+  /** Wall-clock time the simulation has been advanced to. */
+  private lastAdvanceAt = Date.now();
 
   constructor() {
     for (const spec of DEVICE_SPECS) {
@@ -133,14 +135,29 @@ class HmiEngine {
     };
   }
 
+  /**
+   * Steps every device simulation forward to "now". Called both by the internal
+   * timer (when the host keeps the process warm) AND on every read/action — so
+   * on a serverless host, where the timer may be frozen between invocations, the
+   * simulation still produces coherent current values. Idempotent-ish: multiple
+   * callers within the same second do nothing extra.
+   */
+  private advance(): void {
+    const now = Date.now();
+    const steps = Math.min(180, Math.floor((now - this.lastAdvanceAt) / TICK_MS));
+    if (steps < 1) return;
+    for (let i = 0; i < steps; i++) {
+      for (const eng of this.engines.values()) eng.tick();
+    }
+    this.lastAdvanceAt += steps * TICK_MS;
+    this.current = this.build();
+    this.recorder().record(this.frame(this.current.machineContext));
+    this.broadcast();
+  }
+
   private startClock(): void {
     if (this.timer) return;
-    this.timer = setInterval(() => {
-      for (const eng of this.engines.values()) eng.tick();
-      this.current = this.build();
-      this.recorder().record(this.frame(this.current.machineContext));
-      this.broadcast();
-    }, TICK_MS);
+    this.timer = setInterval(() => this.advance(), TICK_MS);
   }
 
   private broadcast(): void {
@@ -153,11 +170,13 @@ class HmiEngine {
   }
 
   getSnapshot(): HmiStreamPayload {
+    this.advance();
     return this.current;
   }
 
   /** Live MachineContext + diagnosis + golden path for the copilot route. */
   getContext(): MachineContext & { __diagnosis: DeviceDiagnosis; __goldenPath: GoldenPath; __primaryHistory: number[]; __deviceId: string } {
+    this.advance();
     const eng = this.engine();
     return Object.assign(eng.buildContext(this.activeScreenId), {
       __diagnosis: eng.diagnose(),
@@ -168,6 +187,7 @@ class HmiEngine {
   }
 
   getReplay() {
+    this.advance();
     return this.recorder().getReplay();
   }
 
@@ -180,6 +200,7 @@ class HmiEngine {
   }
 
   handleAction(req: ActionRequest): ActionResult {
+    this.advance();
     const source: ActionSource = req.source ?? "operator";
 
     if (req.action === "set_device") {

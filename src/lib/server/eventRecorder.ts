@@ -17,6 +17,8 @@ const SEED_STEP = 5;
 export class EventRecorder {
   private frames: StateFrame[] = [];
   private seededEvents: TimelineEvent[] = [];
+  /** Live discrete events kept in memory so Time Travel works without SQLite. */
+  private liveEvents: TimelineEvent[] = [];
   private prev: StateFrame | null = null;
   private readonly spec: DeviceSpec;
 
@@ -90,10 +92,11 @@ export class EventRecorder {
     if (!prev) return;
 
     const emit = (kind: string, title: string, detail: string) => {
+      this.pushLive({ id: `evt-${frame.t}-${kind}`, t: frame.t, clock: clockOf(frame.t), kind, title, detail });
       try {
         insertHmiEvent({ id: `evt-${frame.t}-${kind}`, ts: frame.t, machine: frame.deviceId, kind, title, detail, stateJson: JSON.stringify(frame) });
       } catch {
-        /* best-effort */
+        /* best-effort — in-memory copy above is the source of truth */
       }
     };
     if (prev.running !== frame.running) emit("state", frame.running ? `${this.spec.kind} started` : `${this.spec.kind} stopped`, `In service: ${frame.running}`);
@@ -105,29 +108,39 @@ export class EventRecorder {
 
   recordAction(title: string, detail: string, kind: "operator_action" | "copilot_action"): void {
     const t = Date.now();
+    const id = `act-${t}-${Math.random().toString(36).slice(2, 6)}`;
+    this.pushLive({ id, t, clock: clockOf(t), kind, title, detail });
     try {
-      insertHmiEvent({ id: `act-${t}-${Math.random().toString(36).slice(2, 6)}`, ts: t, machine: this.spec.id, kind, title, detail, stateJson: this.prev ? JSON.stringify(this.prev) : null });
+      insertHmiEvent({ id, ts: t, machine: this.spec.id, kind, title, detail, stateJson: this.prev ? JSON.stringify(this.prev) : null });
     } catch {
       /* best-effort */
     }
   }
 
+  private pushLive(e: TimelineEvent): void {
+    this.liveEvents.push(e);
+    if (this.liveEvents.length > 200) this.liveEvents.shift();
+  }
+
   getReplay(): ReplayData {
     const frames = [...this.frames].sort((a, b) => a.t - b.t);
+    const from = frames[0]?.t ?? Date.now();
+    const to = frames[frames.length - 1]?.t ?? Date.now();
     let persisted: TimelineEvent[] = [];
     try {
-      persisted = listHmiEvents()
-        .filter((e) => e.machine === this.spec.id)
+      // Only events inside this session's frame window, and not already held in memory.
+      persisted = listHmiEvents(from)
+        .filter((e) => e.machine === this.spec.id && e.ts <= to && !this.liveEvents.some((l) => l.id === e.id))
         .map((e) => ({ id: e.id, t: e.ts, clock: clockOf(e.ts), kind: e.kind, title: e.title, detail: e.detail }));
     } catch {
       /* ignore */
     }
     return {
       deviceId: this.spec.id,
-      from: frames[0]?.t ?? Date.now(),
-      to: frames[frames.length - 1]?.t ?? Date.now(),
+      from,
+      to,
       frames,
-      events: [...this.seededEvents, ...persisted].sort((a, b) => a.t - b.t),
+      events: [...this.seededEvents, ...this.liveEvents, ...persisted].sort((a, b) => a.t - b.t),
     };
   }
 

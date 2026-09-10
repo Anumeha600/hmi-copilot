@@ -1,15 +1,35 @@
-import Database from "better-sqlite3";
+import { createRequire } from "node:module";
 import path from "node:path";
+import type BetterSqlite3 from "better-sqlite3";
 import type { MaintenanceLogRecord } from "@/types";
 
+type DB = BetterSqlite3.Database;
+
 declare global {
-  var __sensegridDb: Database.Database | undefined;
+  var __sensegridDb: DB | undefined;
+}
+
+/**
+ * `better-sqlite3` is a native module and is entirely optional here — it only
+ * persists discrete demo events. Load it lazily so a host where the binding
+ * can't load, or where the filesystem is read-only (e.g. serverless), degrades
+ * to in-memory behaviour instead of crashing.
+ */
+let driver: { new (p: string): DB } | null | undefined;
+function loadDriver(): { new (p: string): DB } | null {
+  if (driver !== undefined) return driver;
+  try {
+    driver = createRequire(import.meta.url)("better-sqlite3") as { new (p: string): DB };
+  } catch {
+    driver = null;
+  }
+  return driver;
 }
 
 /** Additive schema evolution — no migration framework exists, so this just adds
  *  any RUL columns missing from a maintenance_logs table created before this
  *  feature existed. New columns are nullable; existing rows/reads are unaffected. */
-function migrateRULColumns(db: Database.Database): void {
+function migrateRULColumns(db: DB): void {
   const existing = new Set(
     (db.pragma("table_info(maintenance_logs)") as { name: string }[]).map((c) => c.name)
   );
@@ -24,9 +44,11 @@ function migrateRULColumns(db: Database.Database): void {
   }
 }
 
-function createDb(): Database.Database {
+function createDb(): DB {
+  const Ctor = loadDriver();
+  if (!Ctor) throw new Error("better-sqlite3 native binding is unavailable");
   const dbPath = path.join(process.cwd(), "sensegrid.db");
-  const db = new Database(dbPath);
+  const db = new Ctor(dbPath);
   db.pragma("journal_mode = WAL");
   db.exec(`
     CREATE TABLE IF NOT EXISTS maintenance_logs (
@@ -99,7 +121,7 @@ export function clearHmiEvents(): void {
  * events, which are best-effort. See DEPLOYMENT.md.
  */
 let dbUnavailable = false;
-function getDb(): Database.Database | null {
+function getDb(): DB | null {
   if (globalThis.__sensegridDb) return globalThis.__sensegridDb;
   if (dbUnavailable) return null;
   try {
