@@ -26,6 +26,13 @@ const LANES: Lane[] = [
     to: { title: "HMI Client", subtitle: "useTelemetry() · React" },
   },
   {
+    key: "plc",
+    color: "#38bdf8",
+    from: { title: "Software PLC", subtitle: "lib/plc.ts · deterministic state machine" },
+    arrowLabel: "frequency setpoint → motor process (VFD simulated)",
+    to: { title: "Motor Process", subtitle: "RPM · current · temperature · vibration" },
+  },
+  {
     key: "sqlite",
     color: "#10b981",
     from: { title: "SQLite", subtitle: "maintenance_logs table" },
@@ -197,7 +204,7 @@ export function ArchitectureDiagramCaption() {
       transition={{ delay: 0.2 }}
       className="mt-3 text-xs text-slate-500"
     >
-      All four pipelines are driven by the same server-side tick — the diagram above reflects the
+      All five pipelines are driven by the same server-side tick — the diagram above reflects the
       live connection state and current alert count, not a static illustration. Prediction is
       computed locally from telemetry (OLS trend regression → RUL / failure probability). The
       LLM is optional and only formats engineering reports — it never computes a number.

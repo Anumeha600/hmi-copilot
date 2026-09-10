@@ -4,6 +4,7 @@ import { motion } from "framer-motion";
 import {
   Boxes,
   CheckCircle2,
+  CircuitBoard,
   Database,
   GitBranch,
   LayoutTemplate,
@@ -37,7 +38,7 @@ const STACK = [
     name: "SQLite",
     tone: "text-amber-300",
     ring: "ring-amber-500/25",
-    description: "better-sqlite3 persists every completed maintenance action to a local sensegrid.db file.",
+    description: "better-sqlite3 persists every completed maintenance action to a local SQLite database file.",
   },
   {
     icon: LineChart,
@@ -85,6 +86,39 @@ const DATA_FLOW_STEPS = [
   },
 ];
 
+const CONTROL_ARCHITECTURE_STEPS = [
+  {
+    title: "PLC",
+    simulated: true,
+    detail: "Software PLC / Virtual PLC — deterministic state machine (lib/plc.ts) issuing start/stop commands and a frequency setpoint.",
+  },
+  {
+    title: "VFD",
+    simulated: true,
+    detail: "Variable Frequency Drive. SIMULATED — would translate the PLC's setpoint into real motor drive voltage/frequency.",
+  },
+  {
+    title: "Motor",
+    simulated: false,
+    detail: "The same motor process simulation the Digital Twin, RUL engine, and AI Assistant already read from — no second simulator.",
+  },
+  {
+    title: "Energy Meter",
+    simulated: true,
+    detail: "SIMULATED — not yet implemented. Would meter real power draw for energy optimization in a later phase.",
+  },
+  {
+    title: "Edge Gateway",
+    simulated: true,
+    detail: "SIMULATED — represents where a real deployment would bridge an industrial protocol (Modbus/OPC-UA) to this HMI.",
+  },
+  {
+    title: "Legacy HMI",
+    simulated: false,
+    detail: "This archived application — dashboard, digital twin, PLC control, AI assistant, and history, all reading the same live telemetry.",
+  },
+];
+
 const EXPLAINABLE_PRINCIPLES = [
   {
     title: "Regression performs prediction.",
@@ -115,8 +149,8 @@ export default function SystemArchitecturePage() {
         <div>
           <h1 className="text-xl font-semibold text-slate-100">System Architecture</h1>
           <p className="text-sm text-slate-500 max-w-2xl">
-            How SenseGrid AI actually works, end to end — from the server-owned simulation to the
-            SVG twin on screen.
+            How this archived predictive-maintenance build works, end to end — from the server-owned
+            simulation to the SVG twin on screen.
           </p>
         </div>
       </div>
@@ -190,7 +224,48 @@ export default function SystemArchitecturePage() {
         </div>
       </section>
 
-      {/* 4. Explainable AI */}
+      {/* 4. Control Architecture */}
+      <section className="glass-panel rounded-2xl p-5">
+        <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-slate-400">
+          <CircuitBoard className="h-3.5 w-3.5" />
+          Control Architecture
+        </div>
+        <p className="mt-2 text-xs text-slate-500 max-w-2xl">
+          The intended physical control chain for this process. Only the PLC and the motor process
+          simulation are implemented today — VFD, Energy Meter, and Edge Gateway are placeholders for
+          future phases and are clearly marked <span className="font-semibold text-amber-300">SIMULATED</span>,
+          never claimed as real hardware connectivity.
+        </p>
+        <div className="mt-5 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+          {CONTROL_ARCHITECTURE_STEPS.map((step, i) => (
+            <motion.div
+              key={step.title}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: i * 0.05 }}
+              className="relative rounded-xl border border-white/5 bg-white/[0.02] p-3"
+            >
+              <div className="flex items-center gap-2">
+                <span className="flex h-6 w-6 items-center justify-center rounded-full bg-cyan-500/15 text-xs font-bold text-cyan-300">
+                  {i + 1}
+                </span>
+                <p className="text-sm font-semibold text-slate-100">{step.title}</p>
+              </div>
+              {step.simulated && (
+                <span className="mt-1.5 inline-block rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-300">
+                  Simulated
+                </span>
+              )}
+              <p className="mt-2 text-xs leading-relaxed text-slate-400">{step.detail}</p>
+              {i < CONTROL_ARCHITECTURE_STEPS.length - 1 && (
+                <div className="pointer-events-none absolute top-6 -right-2.5 hidden h-px w-5 bg-gradient-to-r from-cyan-500/40 to-transparent lg:block" />
+              )}
+            </motion.div>
+          ))}
+        </div>
+      </section>
+
+      {/* 5. Explainable AI */}
       <section className="glass-panel rounded-2xl border border-cyan-500/20 p-5">
         <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-slate-400">
           <ShieldCheck className="h-3.5 w-3.5 text-cyan-300" />

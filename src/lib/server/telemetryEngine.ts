@@ -1,7 +1,9 @@
 import { DemoController, buildStaticHealthySnapshot, type DemoTickResult } from "@/lib/demo";
 import { computeAllComponentRUL, toTrendPrediction } from "@/lib/rul";
+import { PLCEngine, type PLCEvent, type PLCTickResult } from "@/lib/plc";
 import { insertMaintenanceLog } from "./db";
 import type {
+  Alert,
   ComponentHealth,
   ComponentId,
   ComponentRUL,
@@ -11,6 +13,7 @@ import type {
   LoadLevel,
   MaintenanceLogEntry,
   OperatorState,
+  PLCTelemetry,
   SensorReading,
   TelemetryPayload,
   TrendPrediction,
@@ -50,6 +53,8 @@ function idleDemoStatus(): DemoStatus {
 
 class TelemetryEngine {
   private controller = new DemoController();
+  private plc = new PLCEngine();
+  private plcEventSeq = 0;
   private listeners = new Set<Listener>();
   private maintenanceLog: MaintenanceLogEntry[] = [];
   private current: TelemetryPayload;
@@ -65,6 +70,8 @@ class TelemetryEngine {
         timeToFailure: number | null;
         bearingPrediction: TrendPrediction;
         componentRUL: Record<ComponentId, ComponentRUL>;
+        alerts: Alert[];
+        plc: PLCTelemetry;
       }
     | null = null;
 
@@ -102,6 +109,7 @@ class TelemetryEngine {
       healthHistory: idle.healthHistory,
       maintenanceLog: [],
       demo: idleDemoStatus(),
+      plc: this.plc.getTelemetry(),
     };
   }
 
@@ -114,7 +122,11 @@ class TelemetryEngine {
     return computeAllComponentRUL(history, componentHealths);
   }
 
-  private buildPayload(result: DemoTickResult, componentRUL: Record<ComponentId, ComponentRUL>): TelemetryPayload {
+  private buildPayload(
+    result: DemoTickResult,
+    componentRUL: Record<ComponentId, ComponentRUL>,
+    plc: PLCTelemetry
+  ): TelemetryPayload {
     const { snapshot, demoStatus } = result;
     return {
       timestamp: snapshot.reading.timestamp,
@@ -142,10 +154,59 @@ class TelemetryEngine {
       healthHistory: snapshot.healthHistory,
       maintenanceLog: this.maintenanceLog,
       demo: demoStatus,
+      plc,
     };
   }
 
-  private applyResult(result: DemoTickResult) {
+  /** Same payload shape, sourced from the PLC's own control-mode process simulation instead of the scripted demo. */
+  private buildControlPayload(result: PLCTickResult, componentRUL: Record<ComponentId, ComponentRUL>): TelemetryPayload {
+    const { snapshot, plc } = result;
+    const ambientPhase: DemoPhase =
+      snapshot.status === "critical" || snapshot.status === "safe_mode"
+        ? "fault"
+        : snapshot.status === "warning"
+          ? "rising"
+          : "healthy";
+    return {
+      timestamp: snapshot.reading.timestamp,
+      phase: "healthy",
+      health: snapshot.health,
+      temperature: snapshot.reading.temperature,
+      vibration: snapshot.reading.vibration,
+      current: snapshot.reading.current,
+      rpm: snapshot.reading.rpm,
+      bearingHealth: snapshot.componentHealths.bearing.health,
+      motorHealth: snapshot.componentHealths.motor.health,
+      shaftHealth: snapshot.componentHealths.shaft.health,
+      fanHealth: snapshot.componentHealths.fan.health,
+      batteryHealth: snapshot.componentHealths.motor.health,
+      operatorLoad: snapshot.operator.loadLevel,
+      timeToFailure: componentRUL.bearing.rulHours,
+      status: snapshot.status,
+      ambientPhase,
+      componentHealths: snapshot.componentHealths,
+      alerts: snapshot.alerts,
+      operator: snapshot.operator,
+      bearingPrediction: toTrendPrediction(componentRUL.bearing),
+      componentRUL,
+      history: snapshot.history,
+      healthHistory: snapshot.healthHistory,
+      maintenanceLog: this.maintenanceLog,
+      demo: {
+        active: false,
+        running: plc.status === "RUNNING",
+        phase: "healthy",
+        phaseLabel: "PLC Control Mode",
+        phaseProgress: 0,
+        totalProgress: 0,
+        loopCount: 0,
+        maintenanceInProgress: false,
+      },
+      plc,
+    };
+  }
+
+  private applyDemoResult(result: DemoTickResult) {
     const componentRUL = this.computeRUL(result.snapshot.history, result.snapshot.componentHealths);
 
     if (result.newMaintenanceEvent) {
@@ -170,7 +231,24 @@ class TelemetryEngine {
         trend: bearingRUL.trendDescription,
       });
     }
-    this.current = this.buildPayload(result, componentRUL);
+    // While the scripted demo owns the process, the PLC is a synchronized, read-only mirror of it.
+    const plcTelemetry = this.plc.syncFromDemo(result.snapshot.reading, result.snapshot.status);
+    this.current = this.buildPayload(result, componentRUL, plcTelemetry);
+    this.applySafeModeOverride();
+    this.broadcast();
+  }
+
+  /** Control-mode tick — used only while the scripted demo is not active; the PLC drives the process itself. */
+  private applyControlTick(deltaMs: number) {
+    const result = this.plc.tick(deltaMs);
+    this.logPlcEvents(result.events);
+    const componentRUL = this.computeRUL(result.snapshot.history, result.snapshot.componentHealths);
+    this.current = this.buildControlPayload(result, componentRUL);
+    this.applySafeModeOverride();
+    this.broadcast();
+  }
+
+  private applySafeModeOverride() {
     if (this.safeModeFields) {
       this.current = {
         ...this.current,
@@ -178,13 +256,36 @@ class TelemetryEngine {
         demo: { ...this.current.demo, running: false },
       };
     }
-    this.broadcast();
+  }
+
+  private logPlcEvents(events: PLCEvent[]) {
+    for (const event of events) {
+      const id = `plc-${event.type}-${Date.now()}-${this.plcEventSeq++}`;
+      insertMaintenanceLog({
+        id,
+        timestamp: Date.now(),
+        phase: "control",
+        component: "PLC",
+        health: this.current.health,
+        vibration: this.current.vibration,
+        temperature: this.current.temperature,
+        action: event.detail,
+        rul: null,
+        failureProbability: null,
+        predictionConfidence: null,
+        trend: null,
+      });
+    }
   }
 
   private startClock() {
     if (this.timer) return;
     this.timer = setInterval(() => {
-      this.applyResult(this.controller.tick(TICK_MS));
+      if (this.controller.isActive()) {
+        this.applyDemoResult(this.controller.tick(TICK_MS));
+      } else {
+        this.applyControlTick(TICK_MS);
+      }
     }, TICK_MS);
   }
 
@@ -203,27 +304,68 @@ class TelemetryEngine {
 
   start() {
     this.safeModeFields = null;
+    this.plc.clearEmergencyStop();
     this.controller.start();
-    this.applyResult(this.controller.tick(0));
+    this.applyDemoResult(this.controller.tick(0));
   }
 
   pause() {
     this.safeModeFields = null;
+    this.plc.clearEmergencyStop();
     this.controller.pause();
-    this.applyResult(this.controller.tick(0));
+    this.applyDemoResult(this.controller.tick(0));
   }
 
   reset() {
     this.safeModeFields = null;
     this.controller.reset();
+    this.plc.reset();
     this.maintenanceLog = [];
     this.current = this.buildIdlePayload();
     this.broadcast();
   }
 
   acknowledge(ruleId: string) {
-    this.controller.acknowledgeAlert(ruleId);
-    this.applyResult(this.controller.tick(0));
+    if (this.controller.isActive()) {
+      this.controller.acknowledgeAlert(ruleId);
+      this.applyDemoResult(this.controller.tick(0));
+    } else {
+      this.plc.acknowledgeAlert(ruleId);
+      this.applyControlTick(0);
+    }
+  }
+
+  // ---------------- PLC control actions ----------------
+  // No-ops (with an error result) while the scripted demo owns the process —
+  // this is the DEMO MODE vs CONTROL MODE split: the two control surfaces never fight.
+
+  private plcAction(run: () => void): { ok: boolean; error?: string } {
+    if (this.controller.isActive()) {
+      return { ok: false, error: "PLC controls are disabled while the Demo is running." };
+    }
+    run();
+    this.applyControlTick(0);
+    return { ok: true };
+  }
+
+  plcStart() {
+    return this.plcAction(() => this.logPlcEvents(this.plc.start()));
+  }
+
+  plcStop() {
+    return this.plcAction(() => this.logPlcEvents(this.plc.stop()));
+  }
+
+  plcSetMode(mode: "AUTO" | "MANUAL") {
+    return this.plcAction(() => this.logPlcEvents(this.plc.setMode(mode)));
+  }
+
+  plcSetFrequencySetpoint(hz: number) {
+    return this.plcAction(() => this.logPlcEvents(this.plc.setFrequencySetpoint(hz)));
+  }
+
+  plcJogFrequency(deltaHz: number) {
+    return this.plcAction(() => this.logPlcEvents(this.plc.jogFrequency(deltaHz)));
   }
 
   /**
@@ -236,6 +378,7 @@ class TelemetryEngine {
    */
   emergencyStop() {
     this.controller.pause();
+    this.plc.triggerEmergencyStop();
 
     const timestamp = Date.now();
     const entry: MaintenanceLogEntry = {
@@ -266,6 +409,21 @@ class TelemetryEngine {
     // Freeze RUL/trend at their exact value the instant Emergency Stop was pressed —
     // the prediction clock must not keep advancing while the machine is in Safe Mode.
     const safeOperator = { ...this.current.operator, loadLevel: "low" as const, cognitiveLoad: 5 };
+    const estopAlert: Alert = {
+      id: "plc-estop",
+      ruleId: "plc-estop",
+      title: "Emergency Stop Activated",
+      severity: "critical",
+      confidence: 100,
+      trendDurationHours: 0,
+      rootCause: "Operator-initiated Emergency Stop — PLC and process latched in Safe Mode.",
+      timeToFailureHours: null,
+      recommendedAction: "Confirm the machine is safe, then Resume to clear Safe Mode.",
+      timestamp,
+      firstTriggeredAt: timestamp,
+      componentId: "bearing",
+      acknowledged: false,
+    };
     this.safeModeFields = {
       status: "safe_mode",
       rpm: 0,
@@ -275,6 +433,8 @@ class TelemetryEngine {
       timeToFailure: this.current.timeToFailure,
       bearingPrediction: this.current.bearingPrediction,
       componentRUL: this.current.componentRUL,
+      alerts: [estopAlert, ...this.current.alerts.filter((a) => a.ruleId !== "plc-estop")],
+      plc: this.plc.getTelemetry(),
     };
     this.current = {
       ...this.current,

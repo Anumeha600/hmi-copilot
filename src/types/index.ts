@@ -168,6 +168,7 @@ export interface TelemetryPayload {
   healthHistory: HealthPoint[];
   maintenanceLog: MaintenanceLogEntry[];
   demo: DemoStatus;
+  plc: PLCTelemetry;
 }
 
 export type TrendDirection = "increasing" | "decreasing" | "improving" | "stable" | "indeterminate";
@@ -200,6 +201,33 @@ export interface ComponentRUL {
   failureProbability: number;
   confidence: number;
   dataSufficient: boolean;
+}
+
+export type PLCStatus = "STOPPED" | "STARTING" | "RUNNING" | "FAULT" | "SAFE_MODE";
+export type PLCOperatingMode = "AUTO" | "MANUAL" | "STOPPED" | "SAFE_MODE";
+export type MotorCommand = "RUN" | "STOP";
+export type InterlockStatus = "OK" | "TRIPPED";
+export type OverloadStatus = "NORMAL" | "OVERLOAD";
+
+/**
+ * Software PLC / Virtual PLC — a simulated industrial control layer, not a
+ * connection to physical PLC hardware. See lib/plc.ts.
+ */
+export interface PLCTelemetry {
+  status: PLCStatus;
+  mode: PLCOperatingMode;
+  motorCommand: MotorCommand;
+  frequencySetpoint: number;
+  actualFrequency: number;
+  permissive: boolean;
+  interlockStatus: InterlockStatus;
+  overloadStatus: OverloadStatus;
+  emergencyStop: boolean;
+  faultCode: string | null;
+  scanTime: number;
+  cycleCount: number;
+  /** True when the scripted demo owns the process — PLC is a synchronized read-only mirror and its own controls are disabled. */
+  demoSynced: boolean;
 }
 
 /** Row shape returned by GET /api/history — persisted in the maintenance_logs SQLite table. */

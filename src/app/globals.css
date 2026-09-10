@@ -1,8 +1,46 @@
 @import "tailwindcss";
 
+/*
+ * HMI Copilot — one committed visual world: white industrial HMI.
+ * Pure white ground, navy/charcoal hairlines, restrained teal for active/AI
+ * state, amber for alarms only. No dark dashboard, no gradients, no neon.
+ */
 :root {
-  --background: #07111f;
-  --foreground: #e6edf7;
+  --background: #eef1f3;      /* room tone behind the console */
+  --foreground: #16232f;
+
+  --surface: #ffffff;
+  --surface-muted: #f5f7f8;   /* cool grey, faint teal bias */
+  --surface-sunken: #eef2f3;
+
+  --hairline: #dde3e8;
+  --hairline-soft: #eaeef0;
+  --border-strong: #16232f;
+
+  --ink: #16232f;             /* navy-charcoal */
+  --ink-soft: #45576a;
+  --ink-faint: #7c8b98;
+
+  --accent: #0f9488;          /* teal — active / AI / healthy */
+  --accent-deep: #0b6f66;
+  --accent-wash: #e7f4f2;
+  --accent-line: #bfe2dd;
+
+  --warn: #b26a06;            /* alarm amber */
+  --warn-wash: #faf0df;
+  --warn-line: #ecd3ab;
+  --warn-deep: #8a6636;
+
+  --critical: #b42318;
+  --critical-wash: #fbeceb;
+  --critical-line: #f0c4c0;
+
+  --shadow-sm: 0 1px 2px rgba(22, 35, 47, 0.06);
+  --shadow-md: 0 1px 2px rgba(22, 35, 47, 0.05), 0 10px 26px rgba(22, 35, 47, 0.055);
+
+  --radius: 7px;
+
+  /* legacy dark-theme tokens — only the archived /legacy pages read these */
   --panel: #0c1a2c;
   --panel-border: rgba(148, 197, 255, 0.12);
 }
@@ -10,50 +48,142 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
 
-* {
-  border-color: var(--panel-border);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-surface-sunken: var(--surface-sunken);
+  --color-hairline: var(--hairline);
+  --color-hairline-soft: var(--hairline-soft);
+  --color-ink: var(--ink);
+  --color-ink-soft: var(--ink-soft);
+  --color-ink-faint: var(--ink-faint);
+  --color-accent: var(--accent);
+  --color-accent-deep: var(--accent-deep);
+  --color-accent-wash: var(--accent-wash);
+  --color-accent-line: var(--accent-line);
+  --color-warn: var(--warn);
+  --color-warn-wash: var(--warn-wash);
+  --color-warn-line: var(--warn-line);
+  --color-warn-deep: var(--warn-deep);
+  --color-critical: var(--critical);
+  --color-critical-wash: var(--critical-wash);
+  --color-critical-line: var(--critical-line);
+
+  --font-sans: var(--font-plex-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --radius-hmi: var(--radius);
 }
 
 html {
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 body {
-  background:
-    radial-gradient(circle at 15% 0%, rgba(34, 211, 238, 0.08), transparent 45%),
-    radial-gradient(circle at 85% 20%, rgba(16, 185, 129, 0.06), transparent 40%),
-    var(--background);
+  background: var(--background);
   color: var(--foreground);
-  font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans);
   min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(148, 197, 255, 0.15);
+  background: rgba(22, 35, 47, 0.16);
   border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(148, 197, 255, 0.3);
+  background: rgba(22, 35, 47, 0.28);
+  background-clip: content-box;
 }
 
+/* ---- shared HMI primitives ---- */
+.hmi-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.hmi-panel {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius);
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes hmi-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(15, 148, 136, 0.45);
+  }
+  70% {
+    box-shadow: 0 0 0 7px rgba(15, 148, 136, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(15, 148, 136, 0);
+  }
+}
+.hmi-live-dot {
+  animation: hmi-pulse 2.4s ease-out infinite;
+}
+
+@keyframes hmi-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.hmi-spin {
+  animation: hmi-spin 0.9s linear infinite;
+}
+
+@keyframes hmi-rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+.hmi-rise {
+  animation: hmi-rise 0.42s cubic-bezier(0.2, 0.7, 0.3, 1) backwards;
+}
+
+@keyframes hmi-fault {
+  50% {
+    stroke-opacity: 0.4;
+  }
+}
+.hmi-fault-pulse {
+  animation: hmi-fault 1.9s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hmi-live-dot,
+  .hmi-spin,
+  .hmi-rise,
+  .hmi-fault-pulse {
+    animation: none !important;
+  }
+}
+
+/* ---- legacy /legacy pages keep their own dark treatment ---- */
 .glass-panel {
   background: linear-gradient(180deg, rgba(18, 34, 56, 0.75), rgba(9, 20, 35, 0.65));
   border: 1px solid var(--panel-border);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
 }
-
 .glow-cyan {
   box-shadow: 0 0 24px -6px rgba(34, 211, 238, 0.45);
 }
@@ -66,7 +196,6 @@ body {
 .glow-red {
   box-shadow: 0 0 28px -4px rgba(239, 68, 68, 0.55);
 }
-
 @keyframes pulse-glow {
   0%,
   100% {
@@ -78,28 +207,24 @@ body {
     filter: drop-shadow(0 0 16px currentColor);
   }
 }
-
 .animate-pulse-glow {
   animation: pulse-glow 1.8s ease-in-out infinite;
 }
-
-@keyframes scan-line {
-  0% {
-    transform: translateY(-100%);
-  }
-  100% {
-    transform: translateY(100%);
-  }
-}
-
 @keyframes twin-spin {
   to {
     transform: rotate(360deg);
   }
 }
-
 .twin-spin {
   animation-name: twin-spin;
   animation-timing-function: linear;
   animation-iteration-count: infinite;
+}
+.legacy-shell {
+  background:
+    radial-gradient(circle at 15% 0%, rgba(34, 211, 238, 0.08), transparent 45%),
+    radial-gradient(circle at 85% 20%, rgba(16, 185, 129, 0.06), transparent 40%),
+    #07111f;
+  color: #e6edf7;
+  color-scheme: dark;
 }

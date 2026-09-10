@@ -69,7 +69,7 @@ function drawWrappedText(
   return y;
 }
 
-/** Draws the SenseGrid activity-pulse mark as vectors — no external image asset needed. */
+/** Draws the activity-pulse mark as vectors — no external image asset needed. */
 function drawLogoMark(page: PDFPage, x: number, y: number, color: ReturnType<typeof rgb>) {
   const points: [number, number][] = [
     [x, y],
@@ -117,7 +117,7 @@ export async function generateReportPdf(rawData: ReportData): Promise<Uint8Array
   // Header band
   page.drawRectangle({ x: 0, y: PAGE_HEIGHT - 92, width: PAGE_WIDTH, height: 92, color: navy });
   drawLogoMark(page, 50, PAGE_HEIGHT - 52, cyan);
-  page.drawText("SenseGrid AI", { x: 96, y: PAGE_HEIGHT - 50, size: 18, font: fontBold, color: white });
+  page.drawText("HMI Copilot", { x: 96, y: PAGE_HEIGHT - 50, size: 18, font: fontBold, color: white });
   page.drawText("Adaptive Industrial HMI - Engineering Report", {
     x: 96,
     y: PAGE_HEIGHT - 66,
@@ -173,7 +173,7 @@ export async function generateReportPdf(rawData: ReportData): Promise<Uint8Array
   y -= 18;
   y = drawWrappedText(page, data.recommendation, left, y, right - left, 10, fontRegular, dark);
 
-  page.drawText("Generated locally by SenseGrid AI. Regression is local; no cloud diagnosis was performed.", {
+  page.drawText("Generated locally by HMI Copilot. Regression is local; no cloud diagnosis was performed.", {
     x: left,
     y: 40,
     size: 8,
@@ -191,7 +191,7 @@ export function formatReportFilename(date: Date): string {
   const d = pad(date.getDate());
   const hh = pad(date.getHours());
   const mm = pad(date.getMinutes());
-  return `SenseGrid_Report_${y}${m}${d}_${hh}${mm}.pdf`;
+  return `HMI_Copilot_Report_${y}${m}${d}_${hh}${mm}.pdf`;
 }
 
 export function downloadPdf(bytes: Uint8Array, filename: string) {

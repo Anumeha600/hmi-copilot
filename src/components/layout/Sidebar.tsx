@@ -3,13 +3,14 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { motion } from "framer-motion";
-import { Activity, Bot, Cpu, Factory, History, Laptop, LayoutDashboard, Network } from "lucide-react";
+import { Activity, Bot, CircuitBoard, Cpu, Factory, History, Laptop, LayoutDashboard, Network } from "lucide-react";
 import { useDeviceProfile } from "@/context/DeviceProfileContext";
 import type { DeviceProfile } from "@/types";
 
 const NAV_ITEMS = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/twin", label: "Digital Twin", icon: Cpu },
+  { href: "/plc", label: "PLC Control", icon: CircuitBoard },
   { href: "/assistant", label: "AI Assistant", icon: Bot },
   { href: "/history", label: "History", icon: History },
   { href: "/system", label: "System Architecture", icon: Network },
@@ -28,7 +29,9 @@ export function Sidebar() {
     <aside className="hidden lg:flex w-60 shrink-0 flex-col border-r border-white/5 bg-[#081422]/60 px-4 py-6">
       <Link href="/" className="flex items-center gap-2 px-2">
         <Activity className="h-6 w-6 text-cyan-400" />
-        <span className="font-semibold tracking-tight text-slate-100">SenseGrid AI</span>
+        <span className="font-semibold tracking-tight text-slate-100">
+          HMI Copilot <span className="text-slate-500 font-normal">· Legacy</span>
+        </span>
       </Link>
 
       <nav className="mt-10 flex flex-col gap-1">

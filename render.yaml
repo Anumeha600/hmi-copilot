@@ -1,0 +1,30 @@
+# Render Blueprint for HMI COPILOT.
+# In the Render dashboard: New → Blueprint → point at this repo. Then set the
+# GROQ_API_KEY value (marked sync:false so it is never stored in this file / git).
+#
+# HMI COPILOT is a full server-side Next.js app (SSE, API routes, in-process
+# machine simulation) — it must run as a Web Service, not a static site.
+
+services:
+  - type: web
+    name: hmi-copilot
+    runtime: node
+    plan: free
+    region: oregon
+    branch: main
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      # Central-AI reasoning. Set the value in the Render dashboard — never commit it.
+      # The app runs fully without it (deterministic edge engine); with it, the
+      # Copilot's conversational replies are phrased by Groq.
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        value: openai/gpt-oss-120b
+      - key: NODE_VERSION
+        value: 22.11.0
+      - key: NODE_ENV
+        value: production

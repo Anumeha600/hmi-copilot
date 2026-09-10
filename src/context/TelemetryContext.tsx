@@ -3,6 +3,7 @@
 import { createContext, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { buildStaticHealthySnapshot } from "@/lib/demo";
 import { computeAllComponentRUL } from "@/lib/rul";
+import { PLCEngine } from "@/lib/plc";
 import type {
   Alert,
   ComponentHealth,
@@ -14,6 +15,7 @@ import type {
   MachineStatus,
   MaintenanceLogEntry,
   OperatorState,
+  PLCTelemetry,
   SensorReading,
   TelemetryPayload,
   TrendPrediction,
@@ -37,6 +39,7 @@ interface TelemetryData {
   bearingPrediction: TrendPrediction;
   componentRUL: Record<ComponentId, ComponentRUL>;
   demo: DemoStatus;
+  plc: PLCTelemetry;
 }
 
 export interface TelemetryContextValue extends TelemetryData {
@@ -46,6 +49,11 @@ export interface TelemetryContextValue extends TelemetryData {
   pauseDemo: () => void;
   resetDemo: () => void;
   emergencyStop: () => void;
+  plcStart: () => void;
+  plcStop: () => void;
+  plcSetMode: (mode: "AUTO" | "MANUAL") => void;
+  plcSetFrequencySetpoint: (hz: number) => void;
+  plcJogFrequency: (deltaHz: number) => void;
 }
 
 export const TelemetryContext = createContext<TelemetryContextValue | null>(null);
@@ -65,6 +73,7 @@ function idleData(): TelemetryData {
     healthHistory: snap.healthHistory,
     bearingPrediction: snap.bearingPrediction,
     componentRUL: computeAllComponentRUL(snap.history, snap.componentHealths),
+    plc: new PLCEngine().getTelemetry(),
     demo: {
       active: false,
       running: false,
@@ -98,15 +107,16 @@ function payloadToData(payload: TelemetryPayload): TelemetryData {
     healthHistory: payload.healthHistory,
     bearingPrediction: payload.bearingPrediction,
     componentRUL: payload.componentRUL,
+    plc: payload.plc,
     demo: payload.demo,
   };
 }
 
-function postAction(action: string, ruleId?: string) {
+function postAction(action: string, extra?: Record<string, unknown>) {
   fetch("/api/telemetry", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(ruleId ? { action, ruleId } : { action }),
+    body: JSON.stringify(extra ? { action, ...extra } : { action }),
   }).catch(() => {});
 }
 
@@ -157,7 +167,7 @@ export function TelemetryProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const acknowledgeAlert = useCallback((ruleId: string) => postAction("acknowledge", ruleId), []);
+  const acknowledgeAlert = useCallback((ruleId: string) => postAction("acknowledge", { ruleId }), []);
   const startDemo = useCallback(() => postAction("start"), []);
   const pauseDemo = useCallback(() => postAction("pause"), []);
   const resetDemo = useCallback(() => {
@@ -165,6 +175,11 @@ export function TelemetryProvider({ children }: { children: ReactNode }) {
     fetch("/api/history/reset", { method: "POST" }).catch(() => {});
   }, []);
   const emergencyStop = useCallback(() => postAction("emergency_stop"), []);
+  const plcStart = useCallback(() => postAction("plc_start"), []);
+  const plcStop = useCallback(() => postAction("plc_stop"), []);
+  const plcSetMode = useCallback((mode: "AUTO" | "MANUAL") => postAction("plc_set_mode", { mode }), []);
+  const plcSetFrequencySetpoint = useCallback((hz: number) => postAction("plc_set_frequency", { frequency: hz }), []);
+  const plcJogFrequency = useCallback((deltaHz: number) => postAction("plc_jog_frequency", { delta: deltaHz }), []);
 
   const value: TelemetryContextValue = {
     ...data,
@@ -174,6 +189,11 @@ export function TelemetryProvider({ children }: { children: ReactNode }) {
     pauseDemo,
     resetDemo,
     emergencyStop,
+    plcStart,
+    plcStop,
+    plcSetMode,
+    plcSetFrequencySetpoint,
+    plcJogFrequency,
   };
 
   return <TelemetryContext.Provider value={value}>{children}</TelemetryContext.Provider>;
