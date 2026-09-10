@@ -8,6 +8,7 @@
 
 import type { AlarmSeverity, DeviceDiagnosis, MachineContext, ProcessValue } from "./model";
 import type { DeviceSpec } from "./deviceSpecs";
+import { pvValueAt, SEED_LEAD_MS, type DeviceRuntimeState } from "./sessionState";
 
 export interface ReplayAlarm {
   id: string;
@@ -49,6 +50,83 @@ export interface ReplayData {
 
 export function clockOf(t: number): string {
   return new Date(t).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+const round = (v: number, dp: number) => Math.round(v * 10 ** dp) / 10 ** dp;
+
+/**
+ * Deterministically reconstruct the DVR for a device from its runtime state.
+ * Pure function of (spec, deviceState, now) — every serverless invocation
+ * produces the identical timeline. `extraEvents` are operator actions the
+ * client observed during the session.
+ */
+export function buildReplayFromState(
+  spec: DeviceSpec,
+  ds: DeviceRuntimeState,
+  now: number,
+  extraEvents: TimelineEvent[] = []
+): ReplayData {
+  const driver = spec.processValues.find((p) => p.id === spec.alarm.driverPvId)!;
+  const limit = (spec.alarm.direction === "high" ? driver.limitHigh : driver.limitLow) ?? driver.nominal;
+  const from = Math.min(ds.since, now - SEED_LEAD_MS);
+  const STEP = 2000;
+
+  const frames: StateFrame[] = [];
+  let crossFrame: StateFrame | null = null;
+  for (let t = from; t <= now; t += STEP) {
+    const values: Record<string, number> = {};
+    for (const pv of spec.processValues) values[pv.id] = round(pvValueAt(pv, ds, t), pv.decimals);
+    const dv = values[driver.id];
+    const alarmed = !ds.alarmCleared && (spec.alarm.direction === "high" ? dv >= limit : dv <= limit);
+    const sev: AlarmSeverity = alarmed
+      ? spec.alarm.direction === "high"
+        ? dv >= spec.alarm.severity.critical
+          ? "critical"
+          : dv >= spec.alarm.severity.high
+            ? "high"
+            : "medium"
+        : "medium"
+      : "medium";
+    const f: StateFrame = {
+      t,
+      clock: clockOf(t),
+      deviceId: spec.id,
+      running: t < ds.since ? true : ds.inService && !ds.emergencyStop,
+      mode: ds.emergencyStop ? "SAFE_MODE" : ds.mode,
+      values,
+      alarm: alarmed ? { id: spec.alarm.id, label: spec.alarm.label, severity: sev, limit, unit: driver.unit } : null,
+      activeScreenId: null,
+      note: null,
+    };
+    if (alarmed && !crossFrame) crossFrame = f;
+    frames.push(f);
+  }
+
+  const events: TimelineEvent[] = [
+    { id: `seed-${spec.id}-start`, t: from, clock: clockOf(from), kind: "state", title: `${spec.kind} running normally`, detail: `${driver.label} nominal` },
+  ];
+  if (crossFrame) {
+    events.push({
+      id: `seed-${spec.id}-cross`,
+      t: crossFrame.t,
+      clock: crossFrame.clock,
+      kind: "alarm",
+      title: `${driver.label} crosses limit — ${spec.alarm.label}`,
+      detail: `${driver.label} ${crossFrame.values[driver.id]} ${driver.unit} vs ${limit} ${driver.unit}`,
+    });
+    events.push({
+      id: `seed-${spec.id}-cause`,
+      t: Math.min(now, crossFrame.t + 20000),
+      clock: clockOf(Math.min(now, crossFrame.t + 20000)),
+      kind: "copilot_action",
+      title: `Copilot: likely ${spec.rootCause.cause.toLowerCase()}`,
+      detail: spec.recommendedAction,
+    });
+  }
+  events.push(...extraEvents.filter((e) => e.t >= from && e.t <= now));
+  events.sort((a, b) => a.t - b.t);
+
+  return { deviceId: spec.id, from, to: now, frames, events };
 }
 
 function statusOf(spec: DeviceSpec, id: string, value: number, running: boolean): ProcessValue["status"] {

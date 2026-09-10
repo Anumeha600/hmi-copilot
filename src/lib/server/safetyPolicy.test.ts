@@ -2,9 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { SimDeviceEngine } from "../machineContext/simDeviceEngine.ts";
 import { getDeviceSpec } from "../machineContext/deviceSpecs.ts";
+import { initSession } from "../machineContext/sessionState.ts";
 import { evaluateControlAction, describeGuardrailChain } from "./safetyPolicy.ts";
 
-const ctxOf = (id: string) => new SimDeviceEngine(getDeviceSpec(id)).buildContext(null);
+const NOW = Date.parse("2026-09-11T10:00:00Z");
+const ctxOf = (id: string, patch = {}) =>
+  new SimDeviceEngine(getDeviceSpec(id), { ...initSession(NOW).devices[id], ...patch }, NOW).buildContext(null);
 
 test("copilot-proposed STOP is allowed but held for operator authorization", () => {
   const d = evaluateControlAction("STOP", "copilot", ctxOf("M-201"));
@@ -22,6 +25,10 @@ test("acknowledging an alarm needs no authorization for the operator", () => {
   assert.equal(d.requiresOperatorAuth, false);
 });
 
+test("operating-mode change is administrative — no guardrail auth for the operator", () => {
+  assert.equal(evaluateControlAction("SET_MODE_MANUAL", "operator", ctxOf("P-101")).requiresOperatorAuth, false);
+});
+
 test("tank valve moves are critical and guardrailed", () => {
   const d = evaluateControlAction("OPEN_OUTLET", "copilot", ctxOf("T-501"));
   assert.equal(d.allowed, true);
@@ -34,9 +41,7 @@ test("START is rejected while the device is already running", () => {
 });
 
 test("no control other than clearing e-stop is allowed in Safe Mode", () => {
-  const eng = new SimDeviceEngine(getDeviceSpec("P-101"));
-  eng.triggerEmergencyStop("operator");
-  const d = evaluateControlAction("START", "copilot", eng.buildContext(null));
+  const d = evaluateControlAction("START", "copilot", ctxOf("P-101", { emergencyStop: true, inService: false }));
   assert.equal(d.allowed, false);
   assert.match(d.reason, /safe mode/i);
 });

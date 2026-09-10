@@ -1,5 +1,6 @@
-import { getHmiEngine } from "@/lib/server/hmiEngine";
+import { buildCopilotContext, buildReplay } from "@/lib/server/hmiEngine";
 import { runCopilot, type CopilotRequest } from "@/lib/server/copilotReasoner";
+import type { TimelineEvent } from "@/lib/machineContext/replay";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,12 +19,16 @@ const VALID_INTENTS = new Set([
   "golden_path",
   "time_travel",
   "explain_component",
+  "why_highlighted",
+  "machine_status",
+  "alarm_summary",
+  "next_action",
 ]);
 
 export async function POST(request: Request) {
-  let body: CopilotRequest;
+  let body: CopilotRequest & { session?: string; events?: TimelineEvent[] };
   try {
-    body = (await request.json()) as CopilotRequest;
+    body = (await request.json()) as CopilotRequest & { session?: string; events?: TimelineEvent[] };
   } catch {
     return Response.json({ ok: false, error: "invalid JSON body" }, { status: 400 });
   }
@@ -32,12 +37,11 @@ export async function POST(request: Request) {
     return Response.json({ ok: false, error: "unknown intent" }, { status: 400 });
   }
 
-  const engine = getHmiEngine();
-  const ctx = engine.getContext();
+  const ctx = buildCopilotContext(body.session);
   const response = await runCopilot(body, ctx);
 
   const payload: Record<string, unknown> = { ok: true, ...response };
-  if (response.openTimeTravel) payload.replay = engine.getReplay();
+  if (response.openTimeTravel) payload.replay = buildReplay(body.session, body.events ?? []);
 
   return Response.json(payload);
 }

@@ -1,4 +1,4 @@
-import { getHmiEngine, type ActionRequest } from "@/lib/server/hmiEngine";
+import { applyHmiAction, type ActionRequest } from "@/lib/server/hmiEngine";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -28,6 +28,6 @@ export async function POST(request: Request) {
     return Response.json({ ok: false, error: "unknown action" }, { status: 400 });
   }
 
-  const result = getHmiEngine().handleAction(body);
+  const result = applyHmiAction(body);
   return Response.json(result, { status: result.ok || result.needsAuth ? 200 : 409 });
 }

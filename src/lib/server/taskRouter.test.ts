@@ -29,3 +29,15 @@ test("idle routing reflects whether an alarm is active", () => {
   assert.match(idleRouting(true, false).task, /Alarm mapping/i);
   assert.match(idleRouting(false, false).task, /monitoring/i);
 });
+
+test("status / summary / next-action intents stay on the edge (no Groq)", () => {
+  for (const i of ["machine_status", "alarm_summary", "next_action", "golden_path", "time_travel"] as const) {
+    assert.equal(classifyTask(i, undefined, true).tier, "edge", `${i} should be edge`);
+  }
+});
+
+test("component explanation routes central when an LLM is available, else edge", () => {
+  assert.equal(classifyTask("why_highlighted", undefined, true).tier, "central");
+  assert.equal(classifyTask("explain_component", undefined, true).tier, "central");
+  assert.equal(classifyTask("why_highlighted", undefined, false).tier, "edge");
+});

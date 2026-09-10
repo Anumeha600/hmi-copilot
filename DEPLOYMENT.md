@@ -51,7 +51,7 @@ Environment-variable changes require a redeploy (Vercel prompts).
 ## 4. Local verification before pushing
 
 ```
-npm test          # 34 passing
+npm test          # 52 passing
 npm run build     # compiles clean
 npm run dev       # http://localhost:3000/hmi
 # or production-equivalent:
@@ -61,28 +61,31 @@ npm run build && npm start
 ## 5. Serverless notes (important for a demo)
 
 Vercel runs each Route Handler as a Node.js Function; there is no permanently
-running process and the filesystem is read-only. HMI COPILOT is built to cope:
+running process, no shared memory between instances, and the filesystem is
+read-only. HMI COPILOT is built as a **pure function of `(session, now)`** so it
+does not care which instance serves a request:
 
-- **Simulation advances on read.** `hmiEngine` steps every device forward to
-  "now" on every snapshot/action call (`advance()`), so a cold or idle function
-  instance still serves coherent live values — it does not depend on a
-  background timer surviving between invocations.
-- **SSE** (`/api/hmi/stream`) streams for up to `maxDuration` (60 s) then the
-  browser's `EventSource` reconnects automatically; the reconnect re-syncs to
-  current state. Live telemetry keeps flowing.
-- **State is per-instance.** The `globalThis` engine singleton holds mutable
-  control state (running/stopped, mode, acked, armed incident). On Vercel Hobby
-  a low-traffic app normally runs one warm instance, so START/STOP, device
-  switching, `RUN INCIDENT`, etc. are consistent for a single operator. A cold
-  start re-seeds every device's incident deterministically — a clean demo
-  starting point. For a judged demo, one browser at a time gives perfectly
-  consistent state; if state ever looks out of sync, it self-heals on the next
-  SSE reconnect (seconds).
-- **SQLite (`better-sqlite3`)** is loaded lazily and is **entirely optional** —
-  it only persisted discrete events. On Vercel it can't write, so it's disabled
-  automatically (a one-line warning in the logs); Time Travel uses the
-  in-memory frame ring + seeded incident timeline + in-memory live events and
-  works unchanged. No external database is used or needed.
+- **The client holds the demo state.** On load the browser calls
+  `POST /api/hmi/session` once to mint a small signed-ish `SessionState` string
+  (device flags: running/stopped, mode, acknowledged, armed incident, plus the
+  telemetry anchor). Every request — SSE, `/api/hmi/action`, `/api/copilot`,
+  `/api/hmi/replay` — carries that string. The server never stores it.
+- **The server is stateless and deterministic.** `hmiEngine` +
+  `sessionState.ts` compute machine state and telemetry in closed form from
+  `(session, now)` — no `globalThis`, no `setInterval`, no `advance()` side
+  effects. Two concurrent instances given the same session always agree.
+- **Actions return a new session.** `/api/hmi/action` applies the transition
+  and returns `{ ok, feedback, session, payload, event }`. The client adopts
+  the new `session` and the SSE stream reconnects to it (`?s=…`), so START/STOP,
+  MODE, `RUN INCIDENT`, and device switching are reliable regardless of Vercel
+  instance routing.
+- **SSE** (`/api/hmi/stream?s=…`) streams for up to `maxDuration` (60 s) then
+  the browser's `EventSource` reconnects automatically — always with the
+  current session — and live telemetry keeps flowing.
+- **SQLite (`better-sqlite3`)** is gone from the request path. Time Travel is a
+  pure reconstruction (`buildReplayFromState`) from the session's telemetry
+  anchor plus the client-supplied event log. No external database is used or
+  needed.
 
 ## 6. What to check on the live URL
 

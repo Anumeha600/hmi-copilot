@@ -1,30 +1,39 @@
 /**
- * Generic deterministic device simulator.
+ * Generic deterministic device simulator — PURE.
  *
- * One class drives every demo machine from its DeviceSpec — telemetry, the
- * seeded incident, alarm state, and the deterministic diagnosis the copilot
- * shows without being asked. SIMULATION ONLY; nothing here talks to hardware.
+ * Constructed from a DeviceSpec + a serializable DeviceRuntimeState + the
+ * current clock. All telemetry is a closed-form function of elapsed time, so
+ * any serverless invocation that is handed the same state produces identical
+ * output. Control methods return a NEW DeviceRuntimeState; nothing is stored on
+ * the instance beyond the values computed for `now`.
+ *
+ * SIMULATION ONLY; nothing here talks to hardware.
  */
 
 import type {
   Alarm,
   ContextAnalysisRow,
   CopilotActivityStep,
-  DeviceDiagnosis,
   IoPoint,
   MachineContext,
   MachineEvent,
-  OperatingMode,
   OperatorAction,
   PlcTag,
   ProcessValue,
   ProcessValueStatus,
 } from "./model";
+import type { DeviceDiagnosis } from "./model";
 import type { DeviceSpec, ProcessValueSpec } from "./deviceSpecs";
+import {
+  alarmCrossedAt,
+  computeValues,
+  machineStateOf,
+  pvValueAt,
+  transition,
+  STARTING_MS,
+  type DeviceRuntimeState,
+} from "./sessionState";
 
-function noise(a: number) {
-  return (Math.random() - 0.5) * a;
-}
 function round(v: number, dp: number) {
   const f = 10 ** dp;
   return Math.round(v * f) / f;
@@ -34,129 +43,73 @@ export interface DeviceControlResult {
   ok: boolean;
   error?: string;
   events: MachineEvent[];
+  state: DeviceRuntimeState;
 }
 
+type Source = "operator" | "copilot";
+
 export class SimDeviceEngine {
-  private inService = true;
-  private mode: OperatingMode = "AUTO";
-  private faulted = true;
-  private alarmCleared = false;
-  private emergencyStop = false;
-  private alarmTriggeredAt = Date.now() - 6 * 60_000;
-  private values: Record<string, number> = {};
-  private histories: Record<string, number[]> = {};
-  private lastAlarmActive = true;
-  private lastMode: OperatingMode = "AUTO";
-  /** Counts down after a start command so the HMI can show a brief STARTING transient. */
-  private startingTicks = 0;
   private readonly spec: DeviceSpec;
+  private readonly state: DeviceRuntimeState;
+  private readonly now: number;
+  private readonly values: Record<string, number>;
 
-  constructor(spec: DeviceSpec) {
+  constructor(spec: DeviceSpec, state: DeviceRuntimeState, now: number = Date.now()) {
     this.spec = spec;
-    for (const pv of spec.processValues) {
-      this.values[pv.id] = this.targetFor(pv);
-      // prime ~60 samples of history trending into the incident
-      const start = pv.faultTarget != null ? pv.nominal : this.values[pv.id];
-      this.histories[pv.id] = Array.from({ length: 60 }, (_, i) =>
-        round(start + ((this.values[pv.id] - start) * i) / 59 + noise(pv.noise), pv.decimals)
-      );
-    }
+    this.state = state;
+    this.now = now;
+    this.values = computeValues(spec, state, now);
   }
 
   // --------------------------------------------------------------------
-  private targetFor(pv: ProcessValueSpec): number {
-    if (this.emergencyStop || !this.inService) return pv.stopped;
-    if (pv.kind === "boolean") return this.faulted ? (pv.booleanFaultState ? 1 : pv.nominal) : pv.nominal;
-    if (pv.kind === "counter") return this.values[pv.id] ?? 0;
-    return this.faulted && pv.faultTarget != null ? pv.faultTarget : pv.nominal;
-  }
-
-  tick(): MachineEvent[] {
-    const events: MachineEvent[] = [];
-    if (this.startingTicks > 0) this.startingTicks -= 1;
-    for (const pv of this.spec.processValues) {
-      if (pv.kind === "counter") {
-        const advancing = this.inService && !this.emergencyStop && !this.faulted;
-        this.values[pv.id] += advancing ? (pv.counterRate ?? 1) : 0;
-      } else if (pv.kind === "boolean") {
-        this.values[pv.id] = this.targetFor(pv);
-      } else {
-        const target = this.targetFor(pv);
-        this.values[pv.id] += (target - this.values[pv.id]) * 0.06 + noise(pv.noise);
-      }
-      const h = this.histories[pv.id];
-      h.push(round(this.values[pv.id], pv.decimals));
-      if (h.length > 60) h.shift();
-    }
-
-    const active = this.isAlarmActive();
-    if (active && !this.lastAlarmActive) {
-      this.alarmTriggeredAt = Date.now();
-      events.push(this.event("alarm", this.spec.alarm.severity ? this.severity() : "high", `${this.spec.alarm.label}`, `${this.driverPv().label} crossed its limit.`, this.spec.alarm.id));
-    }
-    if (!active && this.lastAlarmActive) {
-      events.push(this.event("alarm", "info", `${this.spec.alarm.label} cleared`, `${this.driverPv().label} back within limit.`, this.spec.alarm.id));
-    }
-    this.lastAlarmActive = active;
-
-    if (this.mode !== this.lastMode) {
-      events.push(this.event("mode_change", "info", `Mode → ${this.mode}`, `Operating mode changed from ${this.lastMode}.`));
-      this.lastMode = this.mode;
-    }
-    return events;
-  }
-
+  // control — each returns the next DeviceRuntimeState
   // --------------------------------------------------------------------
-  // control
-  // --------------------------------------------------------------------
-  start(source: "operator" | "copilot"): DeviceControlResult {
-    if (this.emergencyStop) return { ok: false, error: "Emergency stop active — clear before starting.", events: [] };
-    if (this.inService) return { ok: false, error: `${this.spec.kind} already running.`, events: [] };
-    this.inService = true;
-    this.startingTicks = 3;
-    return { ok: true, events: [this.actionEvent(source, `${this.spec.kind} START commanded`, "Start sequence initiated.")] };
+  start(source: Source): DeviceControlResult {
+    if (this.state.emergencyStop) return this.fail("Emergency stop active — clear before starting.");
+    if (this.state.inService) return this.fail(`${this.spec.kind} already running.`);
+    const state = transition(this.spec, this.state, { inService: true, startingUntil: this.now + STARTING_MS }, this.now);
+    return { ok: true, events: [this.actionEvent(source, `${this.spec.kind} START commanded`, "Start sequence initiated.")], state };
   }
-  stop(source: "operator" | "copilot"): DeviceControlResult {
-    if (!this.inService) return { ok: false, error: `${this.spec.kind} already stopped.`, events: [] };
-    this.inService = false;
-    this.startingTicks = 0;
-    return { ok: true, events: [this.actionEvent(source, `${this.spec.kind} STOP commanded`, "Stop sequence initiated.")] };
+  stop(source: Source): DeviceControlResult {
+    if (!this.state.inService) return this.fail(`${this.spec.kind} already stopped.`);
+    const state = transition(this.spec, this.state, { inService: false, startingUntil: 0 }, this.now);
+    return { ok: true, events: [this.actionEvent(source, `${this.spec.kind} STOP commanded`, "Stop sequence initiated.")], state };
   }
-
-  /** Demo-scenario director — (re)arms the seeded incident for a presenter. Not a machine control. */
+  setMode(mode: "AUTO" | "MANUAL", source: Source): DeviceControlResult {
+    if (this.state.emergencyStop) return this.fail("Emergency stop active.");
+    if (this.state.mode === mode) return { ok: true, events: [], state: this.state };
+    const state = transition(this.spec, this.state, { mode }, this.now);
+    return { ok: true, events: [this.actionEvent(source, `Mode set to ${mode}`, `Operating mode changed to ${mode}.`)], state };
+  }
+  acknowledgeAlarm(source: Source): DeviceControlResult {
+    const state = transition(this.spec, this.state, { acknowledged: true }, this.now);
+    return { ok: true, events: [this.actionEvent(source, `${this.spec.alarm.label} acknowledged`, "Operator acknowledged the active alarm.")], state };
+  }
+  resolve(source: Source): DeviceControlResult {
+    if (!this.state.faulted) return { ok: true, events: [], state: this.state };
+    const state = transition(this.spec, this.state, { faulted: false, alarmCleared: false, acknowledged: false }, this.now);
+    return { ok: true, events: [this.actionEvent(source, `${this.spec.rootCause.cause} corrected`, "Fault condition cleared; telemetry recovering.")], state };
+  }
+  valve(valveId: string, open: boolean, source: Source): DeviceControlResult {
+    const state = transition(this.spec, this.state, { faulted: false, alarmCleared: false, acknowledged: false }, this.now);
+    return { ok: true, events: [this.actionEvent(source, `${valveId} ${open ? "opened" : "closed"}`, `Valve ${valveId} commanded ${open ? "open" : "closed"}.`)], state };
+  }
+  triggerEmergencyStop(source: Source): DeviceControlResult {
+    const state = transition(this.spec, this.state, { emergencyStop: true, inService: false, startingUntil: 0 }, this.now);
+    return { ok: true, events: [this.actionEvent(source, "EMERGENCY STOP", "Machine latched in Safe Mode by operator.")], state };
+  }
+  /** Demo-scenario director — (re)arms the seeded incident. Not a machine control. */
   armIncident(): DeviceControlResult {
-    if (!this.inService) this.inService = true;
-    this.faulted = true;
-    this.alarmCleared = false;
-    return { ok: true, events: [this.event("alarm", "info", "Demo incident armed", `${this.driverPv().label} beginning to move toward the ${this.spec.alarm.label} condition.`)] };
+    const state = transition(this.spec, this.state, { faulted: true, inService: true, alarmCleared: false, acknowledged: false }, this.now);
+    return {
+      ok: true,
+      events: [this.event("alarm", "info", "Demo incident armed", `${this.driverPv().label} beginning to move toward the ${this.spec.alarm.label} condition.`)],
+      state,
+    };
   }
-  setMode(mode: "AUTO" | "MANUAL", source: "operator" | "copilot"): DeviceControlResult {
-    if (this.emergencyStop) return { ok: false, error: "Emergency stop active.", events: [] };
-    if (this.mode === mode) return { ok: true, events: [] };
-    this.mode = mode;
-    return { ok: true, events: [this.actionEvent(source, `Mode set to ${mode}`, `Operating mode changed to ${mode}.`)] };
-  }
-  acknowledgeAlarm(source: "operator" | "copilot"): DeviceControlResult {
-    return { ok: true, events: [this.actionEvent(source, `${this.spec.alarm.label} acknowledged`, "Operator acknowledged the active alarm.")] };
-  }
-  /** Sim affordance — resolves the seeded incident so the scenario can be replayed. */
-  resolve(source: "operator" | "copilot"): DeviceControlResult {
-    if (!this.faulted) return { ok: true, events: [] };
-    this.faulted = false;
-    this.alarmCleared = false;
-    return { ok: true, events: [this.actionEvent(source, `${this.spec.rootCause.cause} corrected`, "Fault condition cleared; telemetry recovering.")] };
-  }
-  valve(valveId: string, open: boolean, source: "operator" | "copilot"): DeviceControlResult {
-    // Opening the outlet / closing the inlet corrects the seeded imbalance.
-    this.faulted = false;
-    this.alarmCleared = false;
-    return { ok: true, events: [this.actionEvent(source, `${valveId} ${open ? "opened" : "closed"}`, `Valve ${valveId} commanded ${open ? "open" : "closed"}.`)] };
-  }
-  triggerEmergencyStop(source: "operator" | "copilot"): DeviceControlResult {
-    this.emergencyStop = true;
-    this.inService = false;
-    this.mode = "SAFE_MODE";
-    return { ok: true, events: [this.actionEvent(source, "EMERGENCY STOP", "Machine latched in Safe Mode by operator.")] };
+
+  private fail(error: string): DeviceControlResult {
+    return { ok: false, error, events: [], state: this.state };
   }
 
   // --------------------------------------------------------------------
@@ -164,7 +117,7 @@ export class SimDeviceEngine {
     return this.spec.processValues.find((p) => p.id === this.spec.alarm.driverPvId)!;
   }
   private isAlarmActive(): boolean {
-    if (this.alarmCleared || this.emergencyStop) return false;
+    if (this.state.alarmCleared || this.state.emergencyStop) return false;
     const d = this.driverPv();
     const v = this.values[d.id];
     if (this.spec.alarm.direction === "high") return d.limitHigh != null && v >= d.limitHigh;
@@ -185,10 +138,9 @@ export class SimDeviceEngine {
   private pvStatus(pv: ProcessValueSpec): ProcessValueStatus {
     const v = this.values[pv.id];
     if (pv.kind === "boolean") return v !== pv.nominal ? "high" : "normal";
-    if (!this.inService && pv.id !== "level") return v <= pv.stopped + 0.01 ? "low" : "normal";
+    if (!this.state.inService && pv.id !== "level") return v <= pv.stopped + 0.01 ? "low" : "normal";
     if (pv.id === this.spec.alarm.driverPvId && this.isAlarmActive()) {
-      const sev = this.severity();
-      return sev === "critical" ? "critical" : "high";
+      return this.severity() === "critical" ? "critical" : "high";
     }
     if (pv.limitHigh != null && v >= pv.limitHigh) return "high";
     if (pv.limitLow != null && v <= pv.limitLow) return "low";
@@ -198,22 +150,28 @@ export class SimDeviceEngine {
   }
 
   private event(kind: MachineEvent["kind"], severity: MachineEvent["severity"], title: string, detail: string, alarmId?: string): MachineEvent {
-    return { id: `evt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, kind, severity, title, detail, at: Date.now(), alarmId };
+    return { id: `evt-${this.now}-${Math.random().toString(36).slice(2, 6)}`, kind, severity, title, detail, at: this.now, alarmId };
   }
-  private actionEvent(source: "operator" | "copilot", title: string, detail: string): MachineEvent {
+  private actionEvent(source: Source, title: string, detail: string): MachineEvent {
     return {
-      id: `evt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: `evt-${this.now}-${Math.random().toString(36).slice(2, 6)}`,
       kind: source === "copilot" ? "copilot_action" : "operator_action",
       severity: "info",
       title,
       detail: source === "copilot" ? `${detail} (copilot-proposed, operator-authorized)` : detail,
-      at: Date.now(),
+      at: this.now,
     };
   }
 
   // --------------------------------------------------------------------
   primaryHistory(): number[] {
-    return [...(this.histories[this.spec.alarm.driverPvId] ?? [])];
+    const d = this.driverPv();
+    return Array.from({ length: 60 }, (_, i) => round(pvValueAt(d, this.state, this.now - (59 - i) * 1000), d.decimals));
+  }
+  historyOf(pvId: string): number[] {
+    const pv = this.spec.processValues.find((p) => p.id === pvId);
+    if (!pv) return [];
+    return Array.from({ length: 60 }, (_, i) => round(pvValueAt(pv, this.state, this.now - (59 - i) * 1000), pv.decimals));
   }
   driverPvId(): string {
     return this.spec.alarm.driverPvId;
@@ -222,12 +180,10 @@ export class SimDeviceEngine {
     return this.driverPv().unit;
   }
   isRunning(): boolean {
-    return this.inService && !this.emergencyStop;
+    return this.state.inService && !this.state.emergencyStop;
   }
-  machineState(): "STARTING" | "RUNNING" | "STOPPED" | "SAFE_MODE" {
-    if (this.emergencyStop) return "SAFE_MODE";
-    if (!this.inService) return "STOPPED";
-    return this.startingTicks > 0 ? "STARTING" : "RUNNING";
+  machineState() {
+    return machineStateOf(this.state, this.now);
   }
   alarmActive(): boolean {
     return this.isAlarmActive();
@@ -236,10 +192,13 @@ export class SimDeviceEngine {
     const d = this.driverPv();
     return (this.spec.alarm.direction === "high" ? d.limitHigh : d.limitLow) ?? 0;
   }
+  toState(): DeviceRuntimeState {
+    return this.state;
+  }
 
   // --------------------------------------------------------------------
   buildContext(activeScreenId: string | null): MachineContext {
-    const now = Date.now();
+    const now = this.now;
     const dev = this.spec.id;
     const running = this.isRunning();
 
@@ -267,12 +226,12 @@ export class SimDeviceEngine {
         unit: pv.unit || undefined,
         quality: "good",
       })),
-      { id: `${dev}.MODE`, address: "DB10.DBB60", label: "Operating mode", datatype: "STRING", value: this.emergencyStop ? "SAFE_MODE" : this.mode, quality: "good" },
+      { id: `${dev}.MODE`, address: "DB10.DBB60", label: "Operating mode", datatype: "STRING", value: this.state.emergencyStop ? "SAFE_MODE" : this.state.mode, quality: "good" },
     ];
 
     const io: IoPoint[] = [
       { id: "DI0.0", channel: "DI 0.0", direction: "input", label: "Run feedback", state: running },
-      { id: "DI0.3", channel: "DI 0.3", direction: "input", label: "Emergency stop healthy", state: !this.emergencyStop },
+      { id: "DI0.3", channel: "DI 0.3", direction: "input", label: "Emergency stop healthy", state: !this.state.emergencyStop },
       { id: "DO1.1", channel: "DO 1.1", direction: "output", label: "Alarm beacon", state: this.isAlarmActive() },
       ...this.spec.processValues.slice(0, 2).map((pv, i): IoPoint => ({
         id: `AI${2 + i}`,
@@ -293,8 +252,8 @@ export class SimDeviceEngine {
         label: this.spec.alarm.label,
         severity: this.severity(),
         state: "active",
-        message: `${d.label} is ${v} ${d.unit} — ${this.spec.alarm.direction === "high" ? "above" : "below"} the configured limit of ${this.alarmLimit()} ${d.unit}.`,
-        triggeredAt: this.alarmTriggeredAt,
+        message: `${d.label} is ${v} ${d.unit} — ${this.spec.alarm.direction === "high" ? "above" : "below"} the configured limit of ${this.alarmLimit()} ${d.unit}.${this.state.acknowledged ? " (acknowledged)" : ""}`,
+        triggeredAt: alarmCrossedAt(this.spec, this.state, now),
         processValueId: d.id,
         limit: this.alarmLimit(),
         unit: d.unit,
@@ -302,25 +261,18 @@ export class SimDeviceEngine {
       });
     }
 
-    const operatorActions = this.buildOperatorActions();
-
     return {
-      machine: {
-        id: this.spec.id,
-        name: this.spec.name,
-        type: `${this.spec.kind} (simulated)`,
-        location: this.spec.location,
-      },
+      machine: { id: this.spec.id, name: this.spec.name, type: `${this.spec.kind} (simulated)`, location: this.spec.location },
       assets: this.spec.assets,
       tags,
       io,
       processValues,
       alarms,
       operatingModes: ["AUTO", "MANUAL", "STOPPED", "SAFE_MODE"],
-      operatorActions,
+      operatorActions: this.buildOperatorActions(),
       documents: this.spec.documents,
       runtime: {
-        mode: this.emergencyStop ? "SAFE_MODE" : this.mode,
+        mode: this.state.emergencyStop ? "SAFE_MODE" : this.state.mode,
         machineState: this.machineState(),
         shift: "Shift B · 14:00–22:00",
         operator: "Console operator",
@@ -333,22 +285,22 @@ export class SimDeviceEngine {
   }
 
   private buildOperatorActions(): OperatorAction[] {
-    const alarmActive = this.isAlarmActive();
-    const emergency = this.emergencyStop;
+    const alarmActive = this.isAlarmActive() && !this.state.acknowledged;
+    const emergency = this.state.emergencyStop;
+    const ms = this.machineState();
     if (this.spec.controls === "valves") {
       return [
         { id: "OPEN_OUTLET", label: "Open outlet valve", kind: "control", critical: true, enabled: !emergency, disabledReason: emergency ? "Emergency stop active" : undefined },
         { id: "CLOSE_INLET", label: "Close inlet valve", kind: "control", critical: true, enabled: !emergency, disabledReason: emergency ? "Emergency stop active" : undefined },
         { id: "ACK", label: "Acknowledge alarm", kind: "acknowledge", critical: false, enabled: alarmActive, disabledReason: alarmActive ? undefined : "No active alarm" },
-        { id: "RESOLVE", label: "Restore balance (sim)", kind: "control", critical: true, enabled: this.faulted, disabledReason: this.faulted ? undefined : "Already nominal" },
+        { id: "RESOLVE", label: "Restore balance (sim)", kind: "control", critical: true, enabled: this.state.faulted, disabledReason: this.state.faulted ? undefined : "Already nominal" },
       ];
     }
-    const running = this.isRunning();
     return [
-      { id: "STOP", label: "Stop", kind: "control", critical: true, enabled: running, disabledReason: !running ? "Not running" : emergency ? "Emergency stop active" : undefined },
-      { id: "START", label: "Start", kind: "control", critical: true, enabled: !running && !emergency, disabledReason: running ? "Already running" : emergency ? "Emergency stop active" : undefined },
+      { id: "STOP", label: "Stop", kind: "control", critical: true, enabled: (ms === "RUNNING" || ms === "STARTING") && !emergency, disabledReason: ms === "STOPPED" ? "Not running" : emergency ? "Emergency stop active" : undefined },
+      { id: "START", label: "Start", kind: "control", critical: true, enabled: ms === "STOPPED" && !emergency, disabledReason: ms === "RUNNING" || ms === "STARTING" ? "Already running" : emergency ? "Emergency stop active" : undefined },
       { id: "ACK", label: "Acknowledge alarm", kind: "acknowledge", critical: false, enabled: alarmActive, disabledReason: alarmActive ? undefined : "No active alarm" },
-      { id: "RESOLVE", label: `Restore ${this.spec.alarm.focusLabel.toLowerCase()} (sim)`, kind: "control", critical: true, enabled: this.faulted, disabledReason: this.faulted ? undefined : "Already nominal" },
+      { id: "RESOLVE", label: `Restore ${this.spec.alarm.focusLabel.toLowerCase()} (sim)`, kind: "control", critical: true, enabled: this.state.faulted, disabledReason: this.state.faulted ? undefined : "Already nominal" },
     ];
   }
 
@@ -370,7 +322,7 @@ export class SimDeviceEngine {
 
     const activity: CopilotActivityStep[] = alarm
       ? [
-          { id: "detect", label: "Event detected", state: "done", at: this.alarmTriggeredAt },
+          { id: "detect", label: "Event detected", state: "done", at: alarmCrossedAt(this.spec, this.state, this.now) },
           { id: "correlate", label: "Correlating process signals", state: "done" },
           { id: "conditions", label: "Checking operating conditions", state: "done" },
           { id: "causes", label: "Evaluating likely causes", state: "done" },
@@ -404,7 +356,7 @@ export class SimDeviceEngine {
     const contextAnalysis: ContextAnalysisRow[] = [
       { label: d.label, value: `${v} ${d.unit}`, status: "high" },
       { label: "Configured limit", value: `${limit} ${d.unit}`, status: "info" },
-      { label: `${this.spec.kind} state`, value: this.isRunning() ? "Running" : "Stopped", status: "info" },
+      { label: `${this.spec.kind} state`, value: this.machineState() === "RUNNING" ? "Running" : this.machineState(), status: "info" },
       ...this.spec.rootCause.signalPvIds
         .filter((id) => id !== d.id)
         .slice(0, 3)

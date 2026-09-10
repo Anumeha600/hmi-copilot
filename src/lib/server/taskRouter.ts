@@ -26,13 +26,18 @@ export interface TaskRouting {
   degradedToEdge: boolean;
 }
 
-const CENTRAL_INTENTS = new Set<CopilotIntentName>(["explain_event", "show_root_cause", "shift_handover"]);
+const CENTRAL_INTENTS = new Set<CopilotIntentName>(["explain_event", "show_root_cause", "shift_handover", "explain_component", "why_highlighted"]);
 
 const EDGE_TASK_LABELS: Partial<Record<CopilotIntentName, string>> = {
   generate_screen: "Dynamic HMI generation",
   open_sop: "Alarm-to-SOP mapping",
   propose_control_action: "Guardrail policy check",
   replay_event: "Event replay reconstruction",
+  time_travel: "Event replay reconstruction",
+  golden_path: "Golden-path retrieval",
+  machine_status: "Machine-state recognition",
+  alarm_summary: "Alarm classification + evidence",
+  next_action: "Recommended-action lookup",
   ask: "Machine-state recognition + context filtering",
 };
 
@@ -40,6 +45,8 @@ const CENTRAL_TASK_LABELS: Partial<Record<CopilotIntentName, string>> = {
   explain_event: "Natural-language explanation",
   show_root_cause: "Multi-variable root-cause investigation",
   shift_handover: "Cross-shift operational reasoning",
+  explain_component: "Component explanation",
+  why_highlighted: "Highlight-reason explanation",
 };
 
 /** Free-text that clearly needs multi-variable reasoning still routes central even under `ask`. */

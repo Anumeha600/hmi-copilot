@@ -24,7 +24,7 @@ function primEl(p: Prim, key: number) {
 
 export function MachineView({ context, deviceKind, focusAsset, focusNote, machineState }: Props) {
   const stopped = machineState === "STOPPED" || machineState === "SAFE_MODE";
-  const { selectedComponent, selectComponent, clearComponent, explainComponent, ask } = useHmiCopilot();
+  const { selectedComponent, componentAction, selectComponent, clearComponent, explainComponent } = useHmiCopilot();
   const scene = sceneFor(deviceKind);
   const [view, setView] = useState(DEFAULT_VIEW);
   const [hovered, setHovered] = useState<string | null>(null);
@@ -61,7 +61,11 @@ export function MachineView({ context, deviceKind, focusAsset, focusNote, machin
   };
 
   const onPointerDown = (e: React.PointerEvent) => {
-    (e.target as Element).setPointerCapture?.(e.pointerId);
+    try {
+      (e.target as Element).setPointerCapture?.(e.pointerId);
+    } catch {
+      /* no active pointer (e.g. synthetic event) — capture is optional */
+    }
     const pan = e.shiftKey || e.button === 1 || e.button === 2;
     drag.current = { x: e.clientX, y: e.clientY, pan };
     setDragging(pan ? "pan" : "orbit");
@@ -144,7 +148,7 @@ export function MachineView({ context, deviceKind, focusAsset, focusNote, machin
                   }}
                   onDoubleClick={(e) => {
                     e.stopPropagation();
-                    void explainComponent(c.id, c.label);
+                    void explainComponent(c.id, c.label, "explain");
                   }}
                   onMouseEnter={() => setHovered(c.id)}
                   onMouseLeave={() => setHovered((h) => (h === c.id ? null : h))}
@@ -226,10 +230,24 @@ export function MachineView({ context, deviceKind, focusAsset, focusNote, machin
             <p className="mt-1.5 rounded-[3px] bg-accent-wash px-2 py-1 text-[10px] text-[#1f4b46]">Copilot: {focusNote}.</p>
           )}
           <div className="mt-2 flex gap-1.5">
-            <button type="button" className="flex-1 rounded-[3px] border border-ink bg-ink px-2 py-1 text-[8.5px] font-semibold uppercase tracking-wide text-white" onClick={() => void explainComponent(selComp.id, selComp.label)}>
+            <button
+              type="button"
+              aria-pressed={componentAction === "explain"}
+              className={`flex-1 rounded-[3px] border px-2 py-1 text-[8.5px] font-semibold uppercase tracking-wide focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 ${
+                componentAction === "explain" ? "border-ink bg-ink text-white" : "border-ink bg-surface text-ink hover:bg-surface-muted"
+              }`}
+              onClick={() => void explainComponent(selComp.id, selComp.label, "explain")}
+            >
               Explain this component
             </button>
-            <button type="button" className="flex-1 rounded-[3px] border border-hairline bg-surface px-2 py-1 text-[8.5px] font-semibold uppercase tracking-wide text-ink-soft" onClick={() => void ask(`Why is the ${selComp.label} highlighted?`)}>
+            <button
+              type="button"
+              aria-pressed={componentAction === "why"}
+              className={`flex-1 rounded-[3px] border px-2 py-1 text-[8.5px] font-semibold uppercase tracking-wide focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1 ${
+                componentAction === "why" ? "border-ink bg-ink text-white" : "border-ink bg-surface text-ink hover:bg-surface-muted"
+              }`}
+              onClick={() => void explainComponent(selComp.id, selComp.label, "why")}
+            >
               Why highlighted?
             </button>
           </div>

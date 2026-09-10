@@ -6,7 +6,7 @@ import type { HmiScreenDefinition } from "@/lib/hmiSchema";
 import type { CopilotIntentName, CopilotResponse, ScreenTarget } from "@/lib/server/copilotReasoner";
 import type { ControlActionId, PolicyDecision } from "@/lib/server/safetyPolicy";
 import type { GoldenPath } from "@/lib/goldenPath";
-import type { ReplayData, StateFrame } from "@/lib/machineContext/replay";
+import type { ReplayData, StateFrame, TimelineEvent } from "@/lib/machineContext/replay";
 import type { DeviceOption } from "@/lib/machineContext/model";
 
 const RECONNECT_MS = 3000;
@@ -48,6 +48,8 @@ export interface Toast {
 
 /** Which Copilot action panel is currently open — drives the action-button active styling. */
 export type ActivePanel = "investigation" | "root-cause" | "sop" | "golden-path" | "replay" | null;
+/** Which Machine-View component-panel action is selected. */
+export type ComponentAction = "explain" | "why" | null;
 
 interface HmiCopilotValue {
   connection: ConnectionStatus;
@@ -75,6 +77,7 @@ interface HmiCopilotValue {
 
   pendingAction: PendingAction | null;
   selectedComponent: SelectedComponent | null;
+  componentAction: ComponentAction;
   activePanel: ActivePanel;
   toast: Toast | null;
 
@@ -97,7 +100,7 @@ interface HmiCopilotValue {
   setDevice: (id: string) => Promise<void>;
   selectComponent: (id: string, label: string) => void;
   clearComponent: () => void;
-  explainComponent: (id: string, label: string) => Promise<void>;
+  explainComponent: (id: string, label: string, mode: "explain" | "why") => Promise<void>;
   toggleInvestigate: () => void;
   showOnMachine: (assetId?: string | null) => void;
   runIncident: () => Promise<void>;
@@ -121,8 +124,12 @@ const BUSY_LABEL: Partial<Record<CopilotIntentName, string>> = {
   open_sop: "Loading SOP…",
   generate_screen: "Adapting HMI…",
   explain_component: "Reading component context…",
-  ask: "Investigating…",
+  why_highlighted: "Checking why it's flagged…",
+  ask: "Analyzing machine context…",
   shift_handover: "Compiling handover…",
+  machine_status: "Reading machine state…",
+  alarm_summary: "Summarizing incident…",
+  next_action: "Selecting next action…",
 };
 
 export function HmiCopilotProvider({ children }: { children: ReactNode }) {
@@ -151,6 +158,7 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
 
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   const [selectedComponent, setSelectedComponent] = useState<SelectedComponent | null>(null);
+  const [componentAction, setComponentAction] = useState<ComponentAction>(null);
   const [activePanel, setActivePanel] = useState<ActivePanel>(null);
   const [toast, setToast] = useState<Toast | null>(null);
 
@@ -159,6 +167,15 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
   const screenLockedRef = useRef(false);
   const playRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const toastRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The demo session — held in a ref (read from callbacks) + a version counter
+  // that reopens the SSE connection whenever the session changes.
+  const sessionRef = useRef<string>("");
+  const eventLogRef = useRef<TimelineEvent[]>([]);
+  const activePanelRef = useRef<ActivePanel>(null);
+  const [sessionVersion, setSessionVersion] = useState(0);
+  useEffect(() => {
+    activePanelRef.current = activePanel;
+  }, [activePanel]);
 
   const flashToast = useCallback((text: string, tone: Toast["tone"] = "info") => {
     setToast({ text, tone });
@@ -166,27 +183,65 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
     toastRef.current = setTimeout(() => setToast(null), 2800);
   }, []);
 
-  // ---- SSE ----
+  // ---- apply a fresh stream payload (from SSE or an action response) ----
+  const applyPayload = useCallback((p: HmiStreamPayload) => {
+    setPayload(p);
+    setDevices(p.devices);
+    setActiveDeviceId(p.deviceId);
+    setConnection("connected");
+    if (!screenLockedRef.current) {
+      setScreen(p.context.defaultScreen);
+      setScreenSource("engine");
+      setMachineFocusAsset(p.context.machineView.focusAssetId);
+    }
+  }, []);
+
+  /** Adopt a new session and reconnect the SSE stream to it. */
+  const adoptSession = useCallback((s: string | undefined) => {
+    if (s && s !== sessionRef.current) {
+      sessionRef.current = s;
+      setSessionVersion((v) => v + 1);
+    }
+  }, []);
+
+  // ---- mint a session, then stream it ----
   useEffect(() => {
+    let cancelled = false;
+    fetch("/api/hmi/session", { method: "POST" })
+      .then((r) => r.json())
+      .then((j: { session?: string }) => {
+        if (cancelled || !j.session) return;
+        sessionRef.current = j.session;
+        setSessionVersion((v) => (v === 0 ? 1 : v + 1));
+      })
+      .catch(() => {
+        // no session endpoint — the stream will mint one and echo it back
+        if (!cancelled) setSessionVersion((v) => (v === 0 ? 1 : v + 1));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // ---- SSE (reconnects on every session change) ----
+  useEffect(() => {
+    if (sessionVersion === 0) return;
     let cancelled = false;
     function connect() {
       if (cancelled) return;
-      const es = new EventSource("/api/hmi/stream");
+      const url = sessionRef.current ? `/api/hmi/stream?s=${encodeURIComponent(sessionRef.current)}` : "/api/hmi/stream";
+      const es = new EventSource(url);
       esRef.current = es;
       es.onopen = () => !cancelled && setConnection("connected");
       es.onmessage = (e) => {
         if (cancelled) return;
         try {
-          const p = JSON.parse(e.data) as HmiStreamPayload;
-          setPayload(p);
-          setDevices(p.devices);
-          setActiveDeviceId(p.deviceId);
-          setConnection("connected");
-          if (!screenLockedRef.current) {
-            setScreen(p.context.defaultScreen);
-            setScreenSource("engine");
-            setMachineFocusAsset(p.context.machineView.focusAssetId);
-          }
+          const frame = JSON.parse(e.data) as HmiStreamPayload;
+          // Ignore frames from a stream we have since moved on from — after an
+          // action rotates the session the old EventSource may deliver one more
+          // (stale) frame before it closes.
+          if (frame.session && frame.session !== sessionRef.current) return;
+          applyPayload(frame);
         } catch {
           /* skip malformed frame */
         }
@@ -203,60 +258,74 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
       cancelled = true;
       esRef.current?.close();
       if (reconnectRef.current) clearTimeout(reconnectRef.current);
+    };
+  }, [sessionVersion, applyPayload]);
+
+  useEffect(
+    () => () => {
       if (playRef.current) clearInterval(playRef.current);
       if (toastRef.current) clearTimeout(toastRef.current);
-    };
-  }, []);
-
-  // ---- apply a copilot response ----
-  const applyResponse = useCallback(
-    (res: CopilotResponse & { replay?: ReplayData }) => {
-      setLastResponse(res);
-      setConversation((c) => [...c, { role: "copilot", text: res.reply, at: Date.now(), routing: res.routing, source: res.source }]);
-
-      if (res.screen) {
-        screenLockedRef.current = true;
-        setScreen(res.screen);
-        setScreenSource("copilot");
-      }
-      if (res.focusAssetId !== undefined && res.focusAssetId !== null) setMachineFocusAsset(res.focusAssetId);
-
-      // Reconcile which action panel is "active" with what the response actually opened.
-      if (res.goldenPath) setActivePanel("golden-path");
-      else if (res.openTimeTravel) setActivePanel("replay");
-      else if (res.intent === "show_root_cause") setActivePanel("root-cause");
-      else if (res.intent === "explain_event") setActivePanel("investigation");
-      else if (res.intent === "open_sop" && res.sop) setActivePanel("sop");
-      else if (res.intent === "golden_path" && !res.goldenPath) setActivePanel((p) => (p === "golden-path" ? null : p));
-
-      if (res.goldenPath) {
-        setGoldenPath(res.goldenPath);
-        setGoldenStep(0);
-        const step0 = res.goldenPath.steps[0];
-        setHighlight(step0?.highlight ?? null);
-        if (step0?.highlight.machineAsset) setMachineFocusAsset(step0.highlight.machineAsset);
-      }
-      if (res.openTimeTravel && res.replay) {
-        setReplay(res.replay);
-        const last = res.replay.frames[res.replay.frames.length - 1];
-        setReplayT(last?.t ?? null);
-        setReplayFrame(last ?? null);
-      }
     },
     []
   );
 
+  const logEvent = useCallback((e?: TimelineEvent) => {
+    if (!e) return;
+    eventLogRef.current = [...eventLogRef.current, e].slice(-40);
+  }, []);
+
+  // ---- apply a copilot response ----
+  const applyResponse = useCallback((res: CopilotResponse & { replay?: ReplayData }) => {
+    setLastResponse(res);
+    setConversation((c) => [...c, { role: "copilot", text: res.reply, at: Date.now(), routing: res.routing, source: res.source }]);
+
+    if (res.screen) {
+      screenLockedRef.current = true;
+      setScreen(res.screen);
+      setScreenSource("copilot");
+    }
+    if (res.focusAssetId !== undefined && res.focusAssetId !== null) setMachineFocusAsset(res.focusAssetId);
+
+    if (res.goldenPath) setActivePanel("golden-path");
+    else if (res.openTimeTravel) setActivePanel("replay");
+    else if (res.intent === "show_root_cause") setActivePanel("root-cause");
+    else if (res.intent === "explain_event") setActivePanel("investigation");
+    else if (res.intent === "open_sop" && res.sop) setActivePanel("sop");
+    else if (res.intent === "golden_path" && !res.goldenPath) setActivePanel((p) => (p === "golden-path" ? null : p));
+
+    if (res.goldenPath) {
+      setGoldenPath(res.goldenPath);
+      setGoldenStep(0);
+      const step0 = res.goldenPath.steps[0];
+      setHighlight(step0?.highlight ?? null);
+      if (step0?.highlight.machineAsset) setMachineFocusAsset(step0.highlight.machineAsset);
+    }
+    if (res.openTimeTravel && res.replay) {
+      setReplay(res.replay);
+      const last = res.replay.frames[res.replay.frames.length - 1];
+      setReplayT(last?.t ?? null);
+      setReplayFrame(last ?? null);
+    }
+  }, []);
+
   const postCopilot = useCallback(
     async (intent: CopilotIntentName, extra?: Record<string, unknown>) => {
       setCopilotBusy(true);
-      setBusyLabel(BUSY_LABEL[intent] ?? "Working…");
+      setBusyLabel(BUSY_LABEL[intent] ?? "Analyzing machine context…");
       try {
-        const r = await fetch("/api/copilot", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ intent, ...extra }) });
+        const r = await fetch("/api/copilot", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ intent, session: sessionRef.current, events: eventLogRef.current, workflow: activePanelRef.current, ...extra }),
+        });
         const json = (await r.json()) as CopilotResponse & { replay?: ReplayData; ok: boolean };
         if (!json.ok) throw new Error("copilot error");
         applyResponse(json);
       } catch {
-        setConversation((c) => [...c, { role: "copilot", text: "Copilot request could not be completed. Current machine context is still live.", at: Date.now() }]);
+        setConversation((c) => [
+          ...c,
+          { role: "copilot", text: "Central AI unavailable — using Edge Context Engine. The machine context on screen is live and correct.", at: Date.now() },
+        ]);
       } finally {
         setCopilotBusy(false);
         setBusyLabel(null);
@@ -285,10 +354,11 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
         open_sop: "Open the SOP for this condition",
         generate_screen: "Show me the controls I need",
         shift_handover: "Prepare a shift handover",
+        machine_status: "What's the machine status?",
+        alarm_summary: "Summarize this incident",
+        next_action: "What should I do next?",
       };
       if (labels[intent]) setConversation((c) => [...c, { role: "operator", text: labels[intent]!, at: Date.now() }]);
-      // Optimistic active-panel switch so the button styling updates immediately;
-      // applyResponse() reconciles it with what actually opened.
       const optimistic: Partial<Record<CopilotIntentName, ActivePanel>> = {
         show_root_cause: "root-cause",
         open_sop: "sop",
@@ -303,39 +373,56 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
   );
 
   // ---- machine control (through the guardrail) ----
-  const runControl = useCallback(
-    async (action: string, opts?: { mode?: "AUTO" | "MANUAL"; valveId?: string }) => {
-      const r = await fetch("/api/hmi/action", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, source: "operator", ...opts }),
-      });
-      const json = (await r.json()) as { ok: boolean; needsAuth?: boolean; policy?: PolicyDecision; error?: string; feedback?: string };
+  const applyActionResult = useCallback(
+    (json: { ok: boolean; needsAuth?: boolean; policy?: PolicyDecision; error?: string; feedback?: string; session?: string; payload?: HmiStreamPayload; event?: TimelineEvent }, action: string, opts?: { mode?: "AUTO" | "MANUAL"; valveId?: string }) => {
       if (json.needsAuth && json.policy) {
         const actionId: ControlActionId = action === "valve" ? ((opts?.valveId as ControlActionId) ?? "OPEN_OUTLET") : (ACTION_TO_ID[action] ?? "STOP");
         setPendingAction({ action, actionId, label: action.replace(/_/g, " "), policy: json.policy, opts });
-      } else if (json.ok) {
+        return;
+      }
+      if (json.ok) {
+        if (json.payload) applyPayload(json.payload);
+        adoptSession(json.session);
+        logEvent(json.event);
         flashToast(`ACTION AUTHORIZED · ${json.feedback ?? "done"}`, "ok");
-      } else if (json.policy && !json.policy.allowed) {
-        flashToast(`ACTION BLOCKED · ${json.error ?? json.policy.reason}`, "warn");
       } else {
-        flashToast(`ACTION BLOCKED · ${json.error ?? "not permitted"}`, "warn");
+        flashToast(`ACTION BLOCKED · ${json.error ?? json.policy?.reason ?? "not permitted"}`, "warn");
       }
     },
-    [flashToast]
+    [applyPayload, adoptSession, logEvent, flashToast]
+  );
+
+  const runControl = useCallback(
+    async (action: string, opts?: { mode?: "AUTO" | "MANUAL"; valveId?: string }) => {
+      try {
+        const r = await fetch("/api/hmi/action", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action, source: "operator", session: sessionRef.current, ...opts }),
+        });
+        applyActionResult(await r.json(), action, opts);
+      } catch {
+        flashToast("ACTION FAILED · unable to reach the simulator. Retrying keeps the current state.", "warn");
+      }
+    },
+    [applyActionResult, flashToast]
   );
 
   const authorizePending = useCallback(async () => {
     if (!pendingAction) return;
-    const r = await fetch("/api/hmi/action", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: pendingAction.action, source: "operator", authorized: true, ...pendingAction.opts }),
-    });
-    const json = (await r.json()) as { ok: boolean; feedback?: string; error?: string };
+    const { action, opts } = pendingAction;
     setPendingAction(null);
-    flashToast(json.ok ? `ACTION AUTHORIZED · ${json.feedback ?? "done"}` : `ACTION BLOCKED · ${json.error ?? "not permitted"}`, json.ok ? "ok" : "warn");
-  }, [pendingAction, flashToast]);
+    try {
+      const r = await fetch("/api/hmi/action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, source: "operator", authorized: true, session: sessionRef.current, ...opts }),
+      });
+      applyActionResult(await r.json(), action, opts);
+    } catch {
+      flashToast("ACTION FAILED · unable to reach the simulator.", "warn");
+    }
+  }, [pendingAction, applyActionResult, flashToast]);
 
   const cancelPending = useCallback(() => setPendingAction(null), []);
 
@@ -385,21 +472,28 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
     setReplayPlaying(false);
   }, []);
 
-  const scrub = useCallback(async (t: number) => {
-    setReplayT(t);
-    try {
-      const r = await fetch(`/api/hmi/replay?t=${t}`);
-      const json = (await r.json()) as { ok: boolean; frame: StateFrame; screen: HmiScreenDefinition };
-      if (json.ok) {
-        setReplayFrame(json.frame);
-        setScreen(json.screen);
-        setScreenSource("replay");
-        screenLockedRef.current = true;
+  const scrub = useCallback(
+    async (t: number) => {
+      setReplayT(t);
+      try {
+        const r = await fetch("/api/hmi/replay", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session: sessionRef.current, events: eventLogRef.current, t }),
+        });
+        const json = (await r.json()) as { ok: boolean; frame: StateFrame; screen: HmiScreenDefinition };
+        if (json.ok) {
+          setReplayFrame(json.frame);
+          setScreen(json.screen);
+          setScreenSource("replay");
+          screenLockedRef.current = true;
+        }
+      } catch {
+        flashToast("Unable to load replay state. Current machine state retained.", "warn");
       }
-    } catch {
-      flashToast("Unable to load replay state. Current machine state retained.", "warn");
-    }
-  }, [flashToast]);
+    },
+    [flashToast]
+  );
 
   const openTimeTravel = useCallback(async () => {
     setConversation((c) => [...c, { role: "operator", text: "What happened before this alarm?", at: Date.now() }]);
@@ -456,7 +550,6 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
       stopPlay();
       setBusyLabel("Switching machine…");
       setCopilotBusy(true);
-      // clear everything device-specific
       setConversation([]);
       setLastResponse(null);
       setGoldenPath(null);
@@ -466,13 +559,25 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
       setReplayT(null);
       setReplayFrame(null);
       setSelectedComponent(null);
+      setComponentAction(null);
       setActivePanel(null);
+      eventLogRef.current = [];
       screenLockedRef.current = false;
       try {
-        const r = await fetch("/api/hmi/action", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "set_device", deviceId: id }) });
-        const json = (await r.json()) as { ok: boolean; feedback?: string };
-        setActiveDeviceId(id);
-        flashToast(json.feedback ?? "Machine switched", "info");
+        const r = await fetch("/api/hmi/action", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "set_device", deviceId: id, session: sessionRef.current }),
+        });
+        const json = (await r.json()) as { ok: boolean; feedback?: string; session?: string; payload?: HmiStreamPayload };
+        if (json.ok) {
+          if (json.payload) applyPayload(json.payload);
+          adoptSession(json.session);
+          setActiveDeviceId(id);
+          flashToast(json.feedback ?? "Machine switched", "info");
+        } else {
+          flashToast("Unable to switch machine.", "warn");
+        }
       } catch {
         flashToast("Unable to switch machine.", "warn");
       } finally {
@@ -480,22 +585,27 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
         setBusyLabel(null);
       }
     },
-    [activeDeviceId, stopPlay, flashToast]
+    [activeDeviceId, stopPlay, applyPayload, adoptSession, flashToast]
   );
 
   // ---- machine components ----
   const selectComponent = useCallback((id: string, label: string) => {
     setSelectedComponent({ id, label });
+    setComponentAction(null);
     setMachineFocusAsset(id);
   }, []);
-  const clearComponent = useCallback(() => setSelectedComponent(null), []);
+  const clearComponent = useCallback(() => {
+    setSelectedComponent(null);
+    setComponentAction(null);
+  }, []);
 
   const explainComponent = useCallback(
-    async (id: string, label: string) => {
+    async (id: string, label: string, mode: "explain" | "why") => {
       setSelectedComponent({ id, label });
+      setComponentAction(mode);
       setMachineFocusAsset(id);
-      setConversation((c) => [...c, { role: "operator", text: `Explain the ${label}.`, at: Date.now() }]);
-      await postCopilot("explain_component", { componentId: id, componentLabel: label });
+      setConversation((c) => [...c, { role: "operator", text: mode === "why" ? `Why is the ${label} highlighted?` : `Explain the ${label}.`, at: Date.now() }]);
+      await postCopilot(mode === "why" ? "why_highlighted" : "explain_component", { componentId: id, componentLabel: label });
     },
     [postCopilot]
   );
@@ -515,13 +625,25 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
 
   const runIncident = useCallback(async () => {
     try {
-      const r = await fetch("/api/hmi/action", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "run_incident", source: "operator" }) });
-      const json = (await r.json()) as { ok: boolean; feedback?: string };
-      flashToast(json.ok ? `DEMO SCENARIO · ${json.feedback ?? "incident armed"}` : "Could not arm the demo incident.", json.ok ? "info" : "warn");
+      const r = await fetch("/api/hmi/action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "run_incident", source: "operator", session: sessionRef.current }),
+      });
+      const json = (await r.json()) as { ok: boolean; feedback?: string; session?: string; payload?: HmiStreamPayload; event?: TimelineEvent };
+      if (json.ok) {
+        if (json.payload) applyPayload(json.payload);
+        adoptSession(json.session);
+        logEvent(json.event);
+        screenLockedRef.current = false;
+        flashToast(`DEMO SCENARIO · ${json.feedback ?? "incident armed"}`, "info");
+      } else {
+        flashToast("Could not arm the demo incident.", "warn");
+      }
     } catch {
       flashToast("Could not arm the demo incident.", "warn");
     }
-  }, [flashToast]);
+  }, [applyPayload, adoptSession, logEvent, flashToast]);
 
   const value: HmiCopilotValue = {
     connection,
@@ -544,6 +666,7 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
     replayPlaying,
     pendingAction,
     selectedComponent,
+    componentAction,
     activePanel,
     toast,
     ask,

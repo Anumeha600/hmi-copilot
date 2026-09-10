@@ -32,7 +32,11 @@ export type CopilotIntentName =
   | "replay_event"
   | "golden_path"
   | "time_travel"
-  | "explain_component";
+  | "explain_component"
+  | "why_highlighted"
+  | "machine_status"
+  | "alarm_summary"
+  | "next_action";
 
 export type ScreenTarget = "overview" | "subsystem" | "alarm_investigation";
 
@@ -44,6 +48,8 @@ export interface CopilotRequest {
   actionId?: ControlActionId;
   componentId?: string;
   componentLabel?: string;
+  /** current UI workflow phase — keeps free-text answers focused on the active incident */
+  workflow?: "investigation" | "root-cause" | "sop" | "golden-path" | "replay" | null;
 }
 
 export interface ProposedControlAction {
@@ -75,6 +81,7 @@ type LiveContext = MachineContext & {
   __goldenPath: GoldenPath;
   __primaryHistory?: number[];
   __deviceId?: string;
+  __session?: unknown;
 };
 
 function activeAlarm(ctx: MachineContext) {
@@ -89,6 +96,52 @@ function isRunning(ctx: MachineContext) {
 }
 function docFor(ctx: MachineContext, sopId?: string) {
   return ctx.documents.find((d) => d.id === sopId) ?? ctx.documents[0] ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Compact deterministic answers (edge tier — no LLM)
+// ---------------------------------------------------------------------------
+
+function machineStatusLine(ctx: LiveContext): string {
+  const alarm = activeAlarm(ctx);
+  return `${ctx.machine.name}: ${ctx.runtime.machineState}, ${ctx.runtime.mode} mode. ${alarm ? `Active ${alarm.severity} ${alarm.label}.` : "No active alarms — all values within range."}`;
+}
+
+function nextActionLine(ctx: LiveContext): string {
+  const dg = ctx.__diagnosis;
+  if (!activeAlarm(ctx)) return "No action required — the machine is within normal limits.";
+  return `${dg.recommendedAction?.text ?? "Investigate the active alarm."}\nNext step: open Golden Path for the guided resolution sequence.`;
+}
+
+function alarmSummaryBlock(ctx: LiveContext): string {
+  const dg = ctx.__diagnosis;
+  const alarm = activeAlarm(ctx);
+  const d = driverPv(ctx);
+  if (!alarm || !d) return `${ctx.machine.name} — no active alarm. All process values within range.`;
+  const evidence = (dg.alarmIntel?.relatedProcessValues ?? []).slice(0, 3).map((r) => `  ${r.label}: ${r.value}`).join("\n");
+  return [
+    "FINDING",
+    `${d.label} ${d.value} ${d.unit} vs ${alarm.limit} ${d.unit} limit — ${alarm.severity.toUpperCase()} ${alarm.label}.`,
+    "LIKELY CAUSE",
+    dg.rootCause?.cause ?? "—",
+    "EVIDENCE",
+    evidence || "  —",
+    "RECOMMENDED ACTION",
+    dg.recommendedAction?.text ?? "—",
+    "NEXT STEP",
+    "Open Golden Path",
+  ].join("\n");
+}
+
+function whyHighlightedLine(ctx: LiveContext, componentId?: string, componentLabel?: string): string {
+  const dg = ctx.__diagnosis;
+  const alarm = activeAlarm(ctx);
+  const label = componentLabel ?? dg.machineView.focusLabel ?? "component";
+  if (!alarm) return `${label} is not highlighted — there is no active alarm on ${ctx.machine.name}.`;
+  const isFocus = !componentId || componentId === dg.machineView.focusAssetId;
+  if (!isFocus) return `${label} is not the flagged component — the ${alarm.label} alarm points at ${dg.machineView.focusLabel}.`;
+  const signals = (dg.rootCause?.supportingSignals ?? []).slice(0, 2).join("; ");
+  return `${label} is highlighted because the ${alarm.label} alarm is attributed to it. ${dg.rootCause?.rationale ?? ""}${signals ? ` Supporting signals: ${signals}.` : ""}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +195,30 @@ function routeFreeText(text: string, ctx: LiveContext): FreeTextRoute {
   if (/(previous shift|last shift|handover)/.test(q)) {
     return { intent: "shift_handover", reply: `Prepared a shift handover summary for ${ctx.machine.name}.` };
   }
+  if (/(machine status|is it running|running or stopped|current state|what state|what mode|is it stopped|is it running)/.test(q)) {
+    return { intent: "machine_status", reply: machineStatusLine(ctx) };
+  }
+  if (/(summar|what.?s wrong|whats wrong|brief|tl.?dr|quick rundown|the situation|last 30|last thirty)/.test(q)) {
+    return { intent: "alarm_summary", reply: alarmSummaryBlock(ctx) };
+  }
+  if (/(next step|what next|what.?s next|what should i do next|best action|next best)/.test(q)) {
+    return { intent: "next_action", reply: nextActionLine(ctx) };
+  }
+  if (/why.*(highlight|flagged|selected|marked|focused)/.test(q)) {
+    return { intent: "why_highlighted", reply: whyHighlightedLine(ctx) };
+  }
+  if (/(safe to (re)?start|can i (re)?start|is it safe)/.test(q)) {
+    const ms = ctx.runtime.machineState;
+    return {
+      intent: "machine_status",
+      reply:
+        ms === "SAFE_MODE"
+          ? "Not safe — the machine is latched in Safe Mode. Clear the emergency stop at the panel first."
+          : activeAlarm(ctx)
+            ? `The ${activeAlarm(ctx)!.label} alarm is still active. Resolve the cause (${ctx.__diagnosis.rootCause?.cause.toLowerCase()}) before restarting; any start still passes the safety guardrail and your authorization.`
+            : `${ctx.machine.name} is within limits. A start would still require your authorization at the safety guardrail.`,
+    };
+  }
   if (alarm && d && /(why|high|rising|increasing|low|falling|overcurrent|overload|jam|pressure|temperature|level|hot)/.test(q)) {
     return {
       intent: "explain_event",
@@ -194,6 +271,14 @@ function deterministicReply(intent: CopilotIntentName, req: CopilotRequest, ctx:
       return `Opening the machine replay for the minute leading into the ${alarm?.label ?? "current"} condition. Scrub the timeline and the HMI reconstructs each state.`;
     case "golden_path":
       return alarm ? `Golden path for ${alarm.label} loaded — the resolution sequence from ${ctx.__goldenPath.source}. I'll highlight each control step by step.` : "No active condition needs a resolution path right now.";
+    case "machine_status":
+      return machineStatusLine(ctx);
+    case "alarm_summary":
+      return alarmSummaryBlock(ctx);
+    case "next_action":
+      return nextActionLine(ctx);
+    case "why_highlighted":
+      return whyHighlightedLine(ctx, req.componentId, req.componentLabel);
     default:
       return routeFreeText(req.text ?? "", ctx).reply;
   }
@@ -292,10 +377,16 @@ export async function runCopilot(req: CopilotRequest, ctx: LiveContext): Promise
     base.screen = alarm ? buildAlarmInvestigationScreen(ctx, dg, "Explain the active alarm") : buildOverviewScreen(ctx, dg, "Machine status");
   }
 
-  if (intent === "explain_component") {
+  if (intent === "explain_component" || intent === "why_highlighted") {
     base.focusAssetId = req.componentId ?? dg.machineView.focusAssetId;
-    if (alarm && req.componentId === dg.machineView.focusAssetId) base.screen = buildSubsystemScreen(ctx, dg, `Explain ${req.componentLabel ?? "component"}`);
+    if (alarm && (!req.componentId || req.componentId === dg.machineView.focusAssetId)) {
+      base.screen = buildSubsystemScreen(ctx, dg, `${intent === "why_highlighted" ? "Why highlighted" : "Explain"} ${req.componentLabel ?? dg.machineView.focusLabel ?? "component"}`);
+    }
   }
+
+  if (intent === "alarm_summary" && alarm) base.screen = buildAlarmInvestigationScreen(ctx, dg, "Incident summary");
+  if (intent === "machine_status") base.screen = buildOverviewScreen(ctx, dg, "Machine status");
+  if (intent === "next_action" && alarm) base.screen = buildAlarmInvestigationScreen(ctx, dg, "Next action");
 
   if (intent === "open_sop") base.sop = docFor(ctx, req.sopId) ?? undefined;
 
@@ -315,22 +406,33 @@ export async function runCopilot(req: CopilotRequest, ctx: LiveContext): Promise
     };
   }
 
-  if ((intent === "ask" || intent === "explain_event" || intent === "show_root_cause" || intent === "shift_handover" || intent === "explain_component") && hasLLM) {
+  // Central-AI enrichment ONLY for the intents that genuinely need natural
+  // language. Everything else is answered by the edge engine above — no Groq call.
+  const CENTRAL = new Set<CopilotIntentName>(["ask", "explain_event", "show_root_cause", "shift_handover", "explain_component", "why_highlighted"]);
+  if (CENTRAL.has(intent) && hasLLM) {
+    // Send only what the answer needs — related values, not the whole tag list.
+    const relatedIds = new Set<string>([...(alarm?.relatedProcessValueIds ?? []), ...(dg.rootCause?.rationale ? [] : [])]);
+    const pvForLLM = ctx.processValues.filter((p) => relatedIds.size === 0 || relatedIds.has(p.id) || p.status !== "normal");
     const snapshot = {
       environment: "DEMO / SIMULATION — no real PLC connected",
       device: { id: ctx.machine.id, name: ctx.machine.name, kind: dg.deviceKind },
       state: ctx.runtime.machineState,
       mode: ctx.runtime.mode,
-      processValues: ctx.processValues.map((p) => ({ label: p.label, value: p.value, unit: p.unit, status: p.status })),
+      workflow: req.workflow ?? null,
+      processValues: pvForLLM.map((p) => ({ label: p.label, value: p.value, unit: p.unit, status: p.status })),
       alarm: alarm ? { label: alarm.label, severity: alarm.severity, limit: alarm.limit, unit: alarm.unit } : null,
-      edgeHypothesis: dg.rootCause ? { cause: dg.rootCause.cause, confidence: dg.rootCause.confidence } : null,
+      edgeHypothesis: dg.rootCause ? { cause: dg.rootCause.cause, confidence: dg.rootCause.confidence, rationale: dg.rootCause.rationale } : null,
       recommendedAction: dg.recommendedAction?.text ?? null,
-      selectedComponent: req.componentLabel ?? null,
+      selectedComponent: req.componentLabel ?? dg.machineView.focusLabel ?? null,
     };
     const phrased = await phraseWithGroq(req.text || base.reply, snapshot);
     if (phrased) {
       base.reply = phrased;
       base.source = "groq";
+    } else if (base.routing.tier === "central") {
+      // Groq wanted but unavailable — say so, keep the deterministic answer.
+      base.reply = `Central AI unavailable — using Edge Context Engine.\n\n${base.reply}`;
+      base.routing = { ...base.routing, tier: "edge", degradedToEdge: true, handledBy: "Local edge · rule-engine fallback (central AI unavailable)" };
     }
   }
 
