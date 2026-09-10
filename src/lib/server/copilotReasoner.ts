@@ -82,6 +82,7 @@ type LiveContext = MachineContext & {
   __primaryHistory?: number[];
   __deviceId?: string;
   __session?: unknown;
+  __manualSetpoints?: Record<string, number> | null;
 };
 
 function activeAlarm(ctx: MachineContext) {
@@ -418,6 +419,7 @@ export async function runCopilot(req: CopilotRequest, ctx: LiveContext): Promise
       device: { id: ctx.machine.id, name: ctx.machine.name, kind: dg.deviceKind },
       state: ctx.runtime.machineState,
       mode: ctx.runtime.mode,
+      operatorSetpoints: ctx.runtime.mode === "MANUAL" ? (ctx.__manualSetpoints ?? null) : null,
       workflow: req.workflow ?? null,
       processValues: pvForLLM.map((p) => ({ label: p.label, value: p.value, unit: p.unit, status: p.status })),
       alarm: alarm ? { label: alarm.label, severity: alarm.severity, limit: alarm.limit, unit: alarm.unit } : null,

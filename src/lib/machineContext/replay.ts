@@ -181,6 +181,7 @@ export function frameToContext(frame: StateFrame, spec: DeviceSpec): MachineCont
             label: frame.alarm.label,
             severity: frame.alarm.severity,
             state: "active",
+            acknowledged: false,
             message: `${spec.processValues.find((p) => p.id === spec.alarm.driverPvId)?.label} at ${frame.values[spec.alarm.driverPvId]} ${frame.alarm.unit} vs ${frame.alarm.limit} ${frame.alarm.unit} limit.`,
             triggeredAt: frame.t,
             processValueId: spec.alarm.driverPvId,

@@ -16,6 +16,7 @@ import {
   resolveSession,
   type SessionState,
 } from "@/lib/machineContext/sessionState";
+import { classifyManualValue } from "@/lib/machineContext/deviceSpecs";
 import { buildReplayFromState, type ReplayData, type TimelineEvent } from "@/lib/machineContext/replay";
 import { runContextEngine } from "./contextEngine";
 import { evaluateControlAction, type ActionSource, type ControlActionId, type PolicyDecision } from "./safetyPolicy";
@@ -49,6 +50,7 @@ export interface ActionRequest {
     | "emergency_stop"
     | "set_screen"
     | "set_device"
+    | "set_manual_values"
     | "run_incident";
   source?: ActionSource;
   authorized?: boolean;
@@ -56,6 +58,8 @@ export interface ActionRequest {
   screenId?: string;
   deviceId?: string;
   valveId?: "OPEN_OUTLET" | "CLOSE_INLET" | "OPEN_INLET" | "CLOSE_OUTLET";
+  /** operator-entered process values (id → value) for action "set_manual_values" */
+  values?: Record<string, number>;
   session?: string;
 }
 
@@ -117,7 +121,14 @@ export function buildStreamPayload(sessionStr: string | null | undefined, now = 
 export function buildCopilotContext(
   sessionStr: string | null | undefined,
   now = Date.now()
-): MachineContext & { __diagnosis: DeviceDiagnosis; __goldenPath: GoldenPath; __primaryHistory: number[]; __deviceId: string; __session: SessionState } {
+): MachineContext & {
+  __diagnosis: DeviceDiagnosis;
+  __goldenPath: GoldenPath;
+  __primaryHistory: number[];
+  __deviceId: string;
+  __session: SessionState;
+  __manualSetpoints: Record<string, number> | null;
+} {
   const session = resolveSession(sessionStr, now);
   const eng = engineFor(session, session.activeDeviceId, now);
   return Object.assign(eng.buildContext(session.activeScreenId), {
@@ -126,6 +137,7 @@ export function buildCopilotContext(
     __primaryHistory: eng.primaryHistory(),
     __deviceId: session.activeDeviceId,
     __session: session,
+    __manualSetpoints: eng.manualSetpoints(),
   });
 }
 
@@ -166,8 +178,46 @@ export function applyHmiAction(req: ActionRequest, now = Date.now()): ActionResu
   // ---- demo-scenario director (not a machine control) ----
   if (req.action === "run_incident") {
     const r = eng.armIncident();
+    if (!r.ok) return { ok: false, error: r.error };
     const s = { ...session, devices: { ...session.devices, [deviceId]: r.state } };
     return finish(s, `Demo incident armed for ${getDeviceSpec(deviceId).name}`, toTimelineEvent(r.events[0]));
+  }
+
+  // ---- manual operator inputs (MANUAL mode) ----
+  if (req.action === "set_manual_values") {
+    const spec = getDeviceSpec(deviceId);
+    const raw = req.values ?? {};
+    const clean: Record<string, number> = {};
+    const invalid: string[] = [];
+    const unsafe: string[] = [];
+    for (const pv of spec.processValues) {
+      if (!(pv.id in raw)) continue;
+      const n = Number(raw[pv.id]);
+      const cls = classifyManualValue(pv, n);
+      if (cls === "invalid") {
+        invalid.push(pv.label);
+        continue;
+      }
+      clean[pv.id] = pv.decimals > 0 ? Math.round(n * 10 ** pv.decimals) / 10 ** pv.decimals : Math.round(n);
+      if (cls === "unsafe") unsafe.push(pv.label);
+    }
+    if (invalid.length) return { ok: false, error: `Enter a valid number for ${invalid.join(", ")}.` };
+    if (Object.keys(clean).length === 0) return { ok: false, error: "No operator inputs supplied." };
+
+    if (unsafe.length && !req.authorized) {
+      const policy = evaluateControlAction("SET_MANUAL_SETPOINT", source, eng.buildContext(session.activeScreenId));
+      return { ok: false, needsAuth: true, policy };
+    }
+
+    const r = eng.applyManualValues(clean, source);
+    if (!r.ok) return { ok: false, error: r.error };
+    const s = { ...session, devices: { ...session.devices, [deviceId]: r.state } };
+    const applied = Object.keys(clean).map((id) => spec.processValues.find((p) => p.id === id)!.label);
+    return finish(
+      s,
+      `Operator inputs applied — ${applied.join(", ")}${unsafe.length ? " (authorized outside safe range)" : ""}`,
+      toTimelineEvent(r.events[0])
+    );
   }
 
   // ---- guardrail ----

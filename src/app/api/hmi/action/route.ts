@@ -13,6 +13,7 @@ const VALID = new Set<ActionRequest["action"]>([
   "emergency_stop",
   "set_screen",
   "set_device",
+  "set_manual_values",
   "run_incident",
 ]);
 

@@ -36,6 +36,15 @@ export interface ProcessValueSpec {
   booleanFaultState?: boolean;
 }
 
+/** One editable field in MANUAL mode. `pvId` must be a real process value. */
+export interface ManualInputSpec {
+  pvId: string;
+  /** hard bounds for the numeric input — wider than the alarm limits so an operator can drive an incident */
+  min: number;
+  max: number;
+  step: number;
+}
+
 export interface DeviceSpec {
   id: string;
   name: string;
@@ -45,6 +54,8 @@ export interface DeviceSpec {
   controls: "startStop" | "valves";
   assets: AssetNode[];
   processValues: ProcessValueSpec[];
+  /** Which process values the operator can enter directly when MODE = MANUAL. */
+  manualInputs: ManualInputSpec[];
   alarm: {
     id: string;
     label: string;
@@ -89,6 +100,12 @@ const PUMP: DeviceSpec = {
     { id: "flow", label: "Flow", unit: "L/min", kind: "analog", nominal: 38, stopped: 0, normalLow: 32, normalHigh: 44, limitLow: 28, noise: 0.2, decimals: 0, overview: true },
     { id: "speed", label: "Speed", unit: "RPM", kind: "analog", nominal: 1450, stopped: 0, normalLow: 1380, normalHigh: 1500, noise: 2, decimals: 0, overview: true },
     { id: "coolingFlow", label: "Cooling-water flow", unit: "L/min", kind: "analog", nominal: 16, stopped: 0, faultTarget: 7.5, normalLow: 12, normalHigh: 22, limitLow: 12, noise: 0.1, decimals: 1, overview: true },
+  ],
+  manualInputs: [
+    { pvId: "temperature", min: 20, max: 120, step: 1 },
+    { pvId: "speed", min: 0, max: 2000, step: 10 },
+    { pvId: "pressure", min: 0, max: 10, step: 0.1 },
+    { pvId: "flow", min: 0, max: 80, step: 1 },
   ],
   alarm: {
     id: "HIGH_TEMPERATURE",
@@ -165,14 +182,21 @@ const MOTOR: DeviceSpec = {
     { id: "rpm", label: "RPM", unit: "RPM", kind: "analog", nominal: 1480, stopped: 0, faultTarget: 1420, normalLow: 1440, normalHigh: 1500, limitLow: 1400, noise: 3, decimals: 0, overview: true },
     { id: "vibration", label: "Vibration", unit: "mm/s", kind: "analog", nominal: 2.5, stopped: 0, faultTarget: 7.2, normalLow: 0, normalHigh: 4.5, limitHigh: 6, noise: 0.15, decimals: 1, overview: true },
     { id: "load", label: "Load", unit: "%", kind: "analog", nominal: 66, stopped: 0, faultTarget: 95, normalLow: 30, normalHigh: 85, limitHigh: 100, noise: 0.8, decimals: 0, overview: true },
+    { id: "torque", label: "Shaft Torque", unit: "Nm", kind: "analog", nominal: 84, stopped: 0, faultTarget: 176, normalLow: 45, normalHigh: 130, limitHigh: 155, noise: 1.5, decimals: 0, overview: false },
     { id: "temperature", label: "Temperature", unit: "°C", kind: "analog", nominal: 60, stopped: 30, faultTarget: 74, normalLow: 40, normalHigh: 75, limitHigh: 90, noise: 0.3, decimals: 0, overview: false },
+  ],
+  manualInputs: [
+    { pvId: "temperature", min: 20, max: 140, step: 1 },
+    { pvId: "rpm", min: 0, max: 1800, step: 10 },
+    { pvId: "torque", min: 0, max: 220, step: 5 },
+    { pvId: "current", min: 0, max: 30, step: 0.1 },
   ],
   alarm: {
     id: "OVERCURRENT",
     label: "Motor Overcurrent",
     driverPvId: "current",
     direction: "high",
-    relatedPvIds: ["current", "rpm", "vibration", "load", "temperature"],
+    relatedPvIds: ["current", "rpm", "torque", "vibration", "load", "temperature"],
     severity: { medium: 16, high: 18, critical: 21 },
     focusAssetId: "M-201-COUPLING",
     focusLabel: "Coupling / Driven Load",
@@ -181,8 +205,8 @@ const MOTOR: DeviceSpec = {
     cause: "Mechanical overload",
     confidence: "high",
     rationale:
-      "Motor current is rising while speed is falling and vibration is increasing. The motor is drawing more torque to hold speed against a load that has stiffened — consistent with an obstruction or seized element in the driven equipment, not an electrical fault.",
-    signalPvIds: ["current", "rpm", "vibration", "load"],
+      "Motor current is rising while speed is falling and shaft torque and vibration are increasing. The motor is drawing more torque to hold speed against a load that has stiffened — consistent with an obstruction or seized element in the driven equipment, not an electrical fault.",
+    signalPvIds: ["current", "rpm", "torque", "vibration", "load"],
   },
   recommendedAction: "Inspect the connected load for obstruction or binding before restarting.",
   documents: [
@@ -242,6 +266,11 @@ const CONVEYOR: DeviceSpec = {
     { id: "vibration", label: "Vibration", unit: "mm/s", kind: "analog", nominal: 1.8, stopped: 0, faultTarget: 5.5, normalLow: 0, normalHigh: 4, limitHigh: 5, noise: 0.1, decimals: 1, overview: false },
     { id: "productCount", label: "Product Count", unit: "units", kind: "counter", nominal: 0, stopped: 0, counterRate: 0.7, normalLow: 0, normalHigh: 1e9, noise: 0, decimals: 0, overview: true },
     { id: "jamSensor", label: "Jam Sensor", unit: "", kind: "boolean", nominal: 0, stopped: 0, booleanFaultState: true, normalLow: 0, normalHigh: 0, noise: 0, decimals: 0, overview: true },
+  ],
+  manualInputs: [
+    { pvId: "beltSpeed", min: 0, max: 2.5, step: 0.05 },
+    { pvId: "current", min: 0, max: 20, step: 0.1 },
+    { pvId: "motorLoad", min: 0, max: 120, step: 1 },
   ],
   alarm: {
     id: "BELT_JAM",
@@ -318,6 +347,11 @@ const COMPRESSOR: DeviceSpec = {
     { id: "load", label: "Load", unit: "%", kind: "analog", nominal: 70, stopped: 0, faultTarget: 93, normalLow: 30, normalHigh: 88, limitHigh: 100, noise: 1, decimals: 0, overview: true },
     { id: "outletValve", label: "Outlet Valve", unit: "%", kind: "analog", nominal: 100, stopped: 100, faultTarget: 45, normalLow: 80, normalHigh: 100, limitLow: 60, noise: 0, decimals: 0, overview: true },
   ],
+  manualInputs: [
+    { pvId: "temperature", min: 20, max: 130, step: 1 },
+    { pvId: "rpm", min: 0, max: 3300, step: 10 },
+    { pvId: "dischargePressure", min: 0, max: 14, step: 0.1 },
+  ],
   alarm: {
     id: "HIGH_DISCHARGE_PRESSURE",
     label: "High Discharge Pressure",
@@ -393,6 +427,12 @@ const TANK: DeviceSpec = {
     { id: "inletValve", label: "Inlet Valve", unit: "", kind: "boolean", nominal: 1, stopped: 0, normalLow: 0, normalHigh: 1, noise: 0, decimals: 0, overview: true },
     { id: "outletValve", label: "Outlet Valve", unit: "%", kind: "analog", nominal: 100, stopped: 0, faultTarget: 55, normalLow: 60, normalHigh: 100, limitLow: 60, noise: 0, decimals: 0, overview: true },
   ],
+  manualInputs: [
+    { pvId: "level", min: 0, max: 100, step: 1 },
+    { pvId: "inletFlow", min: 0, max: 100, step: 1 },
+    { pvId: "outletFlow", min: 0, max: 100, step: 1 },
+    { pvId: "outletValve", min: 0, max: 100, step: 1 },
+  ],
   alarm: {
     id: "HIGH_LEVEL",
     label: "High Level",
@@ -454,6 +494,14 @@ export const DEVICE_IDS = DEVICE_SPECS.map((d) => d.id);
 
 export function getDeviceSpec(id: string): DeviceSpec {
   return DEVICE_SPECS.find((d) => d.id === id) ?? PUMP;
+}
+
+/** Classify one operator-entered value against a process value's operating envelope. */
+export function classifyManualValue(pv: ProcessValueSpec, v: number): "invalid" | "unsafe" | "abnormal" | "ok" {
+  if (!Number.isFinite(v)) return "invalid";
+  if ((pv.limitHigh != null && v > pv.limitHigh) || (pv.limitLow != null && v < pv.limitLow)) return "unsafe";
+  if (v > pv.normalHigh || v < pv.normalLow) return "abnormal";
+  return "ok";
 }
 
 export const DEVICE_OPTIONS = DEVICE_SPECS.map((d) => ({ id: d.id, name: d.name, kind: d.kind }));

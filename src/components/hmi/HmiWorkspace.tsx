@@ -67,15 +67,21 @@ function WorkspaceInner() {
           )}
 
           <span className="ml-auto flex flex-wrap items-center gap-3">
-            {/* Demo-scenario director */}
+            {/* Demo-scenario director — always available except in Safe Mode; re-arms from a clean baseline */}
             <button
               type="button"
               onClick={() => void runIncident()}
-              disabled={Boolean(alarm)}
-              title={alarm ? "An incident is already active on this machine" : "Arm the seeded incident for this machine"}
+              disabled={opMode === "SAFE_MODE"}
+              title={
+                opMode === "SAFE_MODE"
+                  ? "Clear the emergency stop before arming a demo incident"
+                  : alarm
+                    ? "Re-arm the seeded incident — resets it to a clean baseline and lets it develop again"
+                    : "Arm the seeded incident for this machine"
+              }
               className="rounded-[4px] border border-ink bg-surface px-2 py-1 text-[8.5px] font-bold uppercase tracking-[0.1em] text-ink hover:bg-surface-muted disabled:opacity-40 disabled:cursor-not-allowed focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1"
             >
-              Run Incident
+              {alarm ? "Re-arm Incident" : "Run Incident"}
             </button>
 
             {/* DEMO MODE — status indicator, derived from runtime.connectivity */}

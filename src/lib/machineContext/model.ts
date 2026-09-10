@@ -65,6 +65,8 @@ export interface Alarm {
   label: string;
   severity: AlarmSeverity;
   state: AlarmState;
+  /** operator has acknowledged this alarm (it is still active until the cause clears) */
+  acknowledged: boolean;
   message: string;
   triggeredAt: number;
   processValueId: string | null;

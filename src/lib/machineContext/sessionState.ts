@@ -15,6 +15,8 @@ const DECAY = 0.94;
 export const STARTING_MS = 3000;
 /** How long before "now" the seeded incident began developing. */
 export const SEED_LEAD_MS = 90_000;
+/** Lead time applied by RUN INCIDENT so the fault is already at the alarm limit and visibly developing. */
+export const INCIDENT_LEAD_MS = 6_000;
 
 export interface DeviceRuntimeState {
   inService: boolean;
@@ -29,6 +31,13 @@ export interface DeviceRuntimeState {
   valuesAt: Record<string, number>;
   /** epoch ms — STARTING transient ends */
   startingUntil: number;
+  /**
+   * Operator-entered setpoints, applied while `mode === "MANUAL"`. Each entry is
+   * the value the operator is holding that process value at; unlisted values
+   * simply hold their last position. Cleared on return to AUTO is NOT required —
+   * they are ignored whenever `mode !== "MANUAL"`.
+   */
+  manualValues?: Record<string, number>;
 }
 
 export interface SessionState {
@@ -43,8 +52,21 @@ export interface SessionState {
 // pure telemetry model
 // ---------------------------------------------------------------------------
 
+/** The operator setpoint for this PV, if one is in force (MANUAL mode, finite value). */
+export function manualValueFor(pv: ProcessValueSpec, ds: DeviceRuntimeState): number | null {
+  if (ds.mode !== "MANUAL" || !ds.manualValues) return null;
+  const v = ds.manualValues[pv.id];
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
 export function targetFor(pv: ProcessValueSpec, ds: DeviceRuntimeState): number {
   if (ds.emergencyStop || !ds.inService) return pv.stopped;
+  if (ds.mode === "MANUAL") {
+    // In MANUAL the operator owns every process value: an explicit setpoint is
+    // the target; anything without one simply holds its last position (the sim
+    // does not evolve it).
+    return manualValueFor(pv, ds) ?? ds.valuesAt[pv.id] ?? pv.nominal;
+  }
   if (pv.kind === "boolean") return ds.faulted ? (pv.booleanFaultState ? 1 : pv.nominal) : pv.nominal;
   if (pv.kind === "counter") return pv.nominal;
   return ds.faulted && pv.faultTarget != null ? pv.faultTarget : pv.nominal;
@@ -60,6 +82,8 @@ export function pvValueAt(pv: ProcessValueSpec, ds: DeviceRuntimeState, t: numbe
   const dt = t - ds.since;
   const v0 = ds.valuesAt[pv.id] ?? pv.nominal;
   if (pv.kind === "counter") {
+    // In MANUAL the operator holds the count; otherwise it advances while healthy.
+    if (ds.mode === "MANUAL") return manualValueFor(pv, ds) ?? v0;
     const advancing = ds.inService && !ds.emergencyStop && !ds.faulted;
     return v0 + (advancing ? (pv.counterRate ?? 1) * (dt / 1000) : 0);
   }
@@ -92,6 +116,37 @@ export function alarmCrossedAt(spec: DeviceSpec, ds: DeviceRuntimeState, now: nu
   if (ratio <= 0 || ratio >= 1) return ds.since; // already past, or never crosses
   const dt = (Math.log(ratio) / Math.log(DECAY)) * 1000;
   return Math.min(now, Math.max(ds.since, ds.since + dt));
+}
+
+/**
+ * Runtime state for a device that RUN INCIDENT has just armed: the driver
+ * process value starts at its alarm limit and develops toward the fault target,
+ * so the alarm is active immediately and still visibly moving. In MANUAL the
+ * operator owns the values, so the fault levels are written as operator
+ * setpoints instead.
+ */
+export function armedIncidentState(spec: DeviceSpec, ds: DeviceRuntimeState, now: number): DeviceRuntimeState {
+  const nominal = Object.fromEntries(spec.processValues.map((pv) => [pv.id, pv.nominal]));
+  const d = spec.processValues.find((p) => p.id === spec.alarm.driverPvId)!;
+  const limit = (spec.alarm.direction === "high" ? d.limitHigh : d.limitLow) ?? d.nominal;
+  const base = {
+    ...ds,
+    inService: true,
+    emergencyStop: false,
+    faulted: true,
+    alarmCleared: false,
+    acknowledged: false,
+    startingUntil: 0,
+  };
+
+  if (ds.mode === "MANUAL") {
+    const manual: Record<string, number> = { ...(ds.manualValues ?? {}) };
+    manual[d.id] = d.faultTarget ?? (spec.alarm.direction === "high" ? limit * 1.06 : limit * 0.94);
+    for (const pv of spec.processValues) if (pv.faultTarget != null) manual[pv.id] = pv.faultTarget;
+    return { ...base, since: now, valuesAt: { ...nominal, ...manual }, manualValues: manual };
+  }
+
+  return { ...base, since: now - INCIDENT_LEAD_MS, valuesAt: { ...nominal, [d.id]: limit }, manualValues: ds.manualValues };
 }
 
 // ---------------------------------------------------------------------------

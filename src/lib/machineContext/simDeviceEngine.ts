@@ -26,8 +26,10 @@ import type { DeviceDiagnosis } from "./model";
 import type { DeviceSpec, ProcessValueSpec } from "./deviceSpecs";
 import {
   alarmCrossedAt,
+  armedIncidentState,
   computeValues,
   machineStateOf,
+  manualValueFor,
   pvValueAt,
   transition,
   STARTING_MS,
@@ -87,7 +89,19 @@ export class SimDeviceEngine {
   }
   resolve(source: Source): DeviceControlResult {
     if (!this.state.faulted) return { ok: true, events: [], state: this.state };
-    const state = transition(this.spec, this.state, { faulted: false, alarmCleared: false, acknowledged: false }, this.now);
+    const patch: Partial<DeviceRuntimeState> = { faulted: false, alarmCleared: false, acknowledged: false };
+    // In MANUAL the operator holds the values, so "restore" walks every held
+    // setpoint back to nominal (otherwise the fault value would simply persist).
+    if (this.state.mode === "MANUAL" && this.state.manualValues) {
+      const restored: Record<string, number> = {};
+      for (const id of Object.keys(this.state.manualValues)) {
+        restored[id] = this.spec.processValues.find((p) => p.id === id)?.nominal ?? this.state.manualValues[id];
+      }
+      patch.manualValues = restored;
+      patch.valuesAt = { ...this.values, ...restored };
+      patch.since = this.now;
+    }
+    const state = transition(this.spec, this.state, patch, this.now);
     return { ok: true, events: [this.actionEvent(source, `${this.spec.rootCause.cause} corrected`, "Fault condition cleared; telemetry recovering.")], state };
   }
   valve(valveId: string, open: boolean, source: Source): DeviceControlResult {
@@ -98,12 +112,25 @@ export class SimDeviceEngine {
     const state = transition(this.spec, this.state, { emergencyStop: true, inService: false, startingUntil: 0 }, this.now);
     return { ok: true, events: [this.actionEvent(source, "EMERGENCY STOP", "Machine latched in Safe Mode by operator.")], state };
   }
-  /** Demo-scenario director — (re)arms the seeded incident. Not a machine control. */
+  /**
+   * Demo-scenario director — (re)arms the seeded incident from a clean baseline
+   * so it is visibly developing again on every click. Not a machine control, so
+   * it is not guardrailed; it is refused only while latched in Safe Mode.
+   */
   armIncident(): DeviceControlResult {
-    const state = transition(this.spec, this.state, { faulted: true, inService: true, alarmCleared: false, acknowledged: false }, this.now);
+    if (this.state.emergencyStop) return this.fail("Clear the emergency stop before arming a demo incident.");
+    const state = armedIncidentState(this.spec, this.state, this.now);
+    const d = this.driverPv();
     return {
       ok: true,
-      events: [this.event("alarm", "info", "Demo incident armed", `${this.driverPv().label} beginning to move toward the ${this.spec.alarm.label} condition.`)],
+      events: [
+        this.event(
+          "alarm",
+          "medium",
+          `Demo incident armed — ${this.spec.alarm.label}`,
+          `${d.label} driven to its ${this.alarmLimit()} ${d.unit} limit and developing toward the ${this.spec.alarm.label} condition${this.state.mode === "MANUAL" ? " (manual setpoints updated)" : ""}.`
+        ),
+      ],
       state,
     };
   }
@@ -195,6 +222,50 @@ export class SimDeviceEngine {
   toState(): DeviceRuntimeState {
     return this.state;
   }
+  /** Current (rounded) process values, keyed by pv id — the live telemetry snapshot. */
+  currentValues(): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const pv of this.spec.processValues) out[pv.id] = round(this.values[pv.id], pv.decimals);
+    return out;
+  }
+  /** Operator setpoints in force (MANUAL mode), keyed by pv label — for the copilot context. */
+  manualSetpoints(): Record<string, number> | null {
+    if (this.state.mode !== "MANUAL" || !this.state.manualValues) return null;
+    const out: Record<string, number> = {};
+    for (const pv of this.spec.processValues) {
+      const v = manualValueFor(pv, this.state);
+      if (v != null) out[pv.label] = round(v, pv.decimals);
+    }
+    return Object.keys(out).length ? out : null;
+  }
+
+  /**
+   * Apply operator-entered setpoints (MANUAL mode). Values are assumed already
+   * range-checked by the caller; this snaps telemetry to them immediately.
+   */
+  applyManualValues(values: Record<string, number>, source: Source): DeviceControlResult {
+    const clean: Record<string, number> = {};
+    for (const pv of this.spec.processValues) {
+      const v = values[pv.id];
+      if (typeof v === "number" && Number.isFinite(v)) clean[pv.id] = v;
+    }
+    if (Object.keys(clean).length === 0) return this.fail("No valid operator inputs supplied.");
+    const merged = { ...this.currentValues(), ...clean };
+    const state: DeviceRuntimeState = {
+      ...this.state,
+      mode: "MANUAL",
+      manualValues: { ...(this.state.manualValues ?? {}), ...clean },
+      valuesAt: merged,
+      since: this.now,
+      startingUntil: 0,
+    };
+    const labels = Object.keys(clean).map((id) => this.spec.processValues.find((p) => p.id === id)?.label ?? id);
+    return {
+      ok: true,
+      events: [this.actionEvent(source, "Operator inputs applied", `Manual setpoints entered for ${labels.join(", ")}.`)],
+      state,
+    };
+  }
 
   // --------------------------------------------------------------------
   buildContext(activeScreenId: string | null): MachineContext {
@@ -252,6 +323,7 @@ export class SimDeviceEngine {
         label: this.spec.alarm.label,
         severity: this.severity(),
         state: "active",
+        acknowledged: this.state.acknowledged,
         message: `${d.label} is ${v} ${d.unit} — ${this.spec.alarm.direction === "high" ? "above" : "below"} the configured limit of ${this.alarmLimit()} ${d.unit}.${this.state.acknowledged ? " (acknowledged)" : ""}`,
         triggeredAt: alarmCrossedAt(this.spec, this.state, now),
         processValueId: d.id,

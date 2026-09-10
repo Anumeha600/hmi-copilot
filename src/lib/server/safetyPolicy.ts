@@ -25,6 +25,7 @@ export type ControlActionId =
   | "ACK"
   | "SET_MODE_AUTO"
   | "SET_MODE_MANUAL"
+  | "SET_MANUAL_SETPOINT"
   | "RESOLVE"
   | "EMERGENCY_STOP"
   | "OPEN_INLET"
@@ -58,6 +59,21 @@ export function evaluateControlAction(actionId: ControlActionId, source: ActionS
           ? "Alarm acknowledgement does not affect the process."
           : "Operating-mode change is administrative and does not move the machine.",
       interlocks: [],
+    };
+  }
+
+  if (actionId === "SET_MANUAL_SETPOINT") {
+    // Only reached when the operator has entered a value outside the safe
+    // operating range — always held for explicit authorization.
+    return {
+      allowed: !emergency,
+      requiresOperatorAuth: true,
+      reason: emergency
+        ? "Machine is latched in Safe Mode. Clear the emergency stop before entering manual setpoints."
+        : source === "copilot"
+          ? "Copilot-proposed manual setpoint is outside the safe operating range. Held for operator authorization."
+          : "One or more manual setpoints are outside the safe operating range. Confirm you intend to drive the machine to these values.",
+      interlocks: ["Setpoint is beyond the configured alarm limit", "The process will alarm at this value", "Machine interlocks are checked on execution"],
     };
   }
 

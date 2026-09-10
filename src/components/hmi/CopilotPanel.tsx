@@ -48,6 +48,7 @@ export function CopilotPanel() {
   const rec = context.recommendedAction;
   const finding = context.finding;
   const hasAlarm = Boolean(ev?.alarmId);
+  const alarmAcked = payload.machineContext.alarms.some((a) => a.state === "active" && a.acknowledged);
 
   // one active-state model: only the button whose panel is open is dark navy.
   const chipBase =
@@ -175,8 +176,12 @@ export function CopilotPanel() {
         <button onClick={() => void openTimeTravel()} className={cls("replay")}>
           Replay Event
         </button>
-        <button onClick={() => runControl("acknowledge")} disabled={!hasAlarm} className={`${chipBase} ${INACTIVE}`}>
-          Acknowledge
+        <button
+          onClick={() => runControl("acknowledge")}
+          disabled={!hasAlarm || alarmAcked}
+          className={`${chipBase} ${alarmAcked ? "border-accent-line bg-accent-wash text-accent-deep" : INACTIVE}`}
+        >
+          {alarmAcked ? "Alarm Acknowledged" : "Acknowledge"}
         </button>
       </div>
 

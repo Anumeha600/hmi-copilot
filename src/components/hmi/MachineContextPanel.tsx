@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { MachineContext } from "@/lib/machineContext/model";
 import { MachineView } from "./MachineView";
+import { OperatorInputs } from "./OperatorInputs";
 
 interface Props {
   context: MachineContext;
@@ -32,6 +33,7 @@ export function MachineContextPanel({ context, deviceKind, focusAsset, focusNote
   const driver = alarm?.processValueId ? context.processValues.find((p) => p.id === alarm.processValueId) : undefined;
   const overBy = driver && alarm?.limit != null ? Math.round((driver.value - alarm.limit) * 10) / 10 : null;
   const keyValues = context.processValues.slice(0, 5);
+  const manual = context.runtime.mode === "MANUAL";
 
   return (
     <section className="flex flex-col gap-3.5 p-3.5">
@@ -50,6 +52,10 @@ export function MachineContextPanel({ context, deviceKind, focusAsset, focusNote
             {stateLabel}
           </span>
         </div>
+        <div className="flex items-center justify-between border-t border-hairline-soft px-3 py-1 text-[8.5px] font-bold uppercase tracking-[0.12em] text-ink-faint">
+          <span>Process values</span>
+          <span className={manual ? "text-accent-deep" : "text-ink-faint"}>{manual ? "Operator-controlled" : "Simulator-controlled"}</span>
+        </div>
         {keyValues.map((p) => (
           <div key={p.id} className="flex items-center justify-between border-t border-hairline-soft px-3 py-2 text-[12px]">
             <span className="text-ink-soft">{p.label}</span>
@@ -61,10 +67,12 @@ export function MachineContextPanel({ context, deviceKind, focusAsset, focusNote
         ))}
       </div>
 
+      {manual && <OperatorInputs />}
+
       {alarm ? (
         <div className="flex flex-col gap-0.5 rounded-[6px] border border-warn-line bg-warn-wash px-3 py-2.5" style={{ borderLeftWidth: 3 }}>
           <div className="flex items-center justify-between">
-            <span className="text-[9.5px] font-bold uppercase tracking-[0.14em] text-warn-deep">Active Alarm</span>
+            <span className="text-[9.5px] font-bold uppercase tracking-[0.14em] text-warn-deep">Active Alarm{alarm.acknowledged ? " · Acknowledged" : ""}</span>
             <span className="rounded-[3px] bg-warn px-1.5 text-[8.5px] font-bold uppercase tracking-wide text-white">{alarm.severity}</span>
           </div>
           <span className="text-[14px] font-bold text-warn">{alarm.label}</span>

@@ -33,7 +33,7 @@ export interface PendingAction {
   actionId: ControlActionId;
   label: string;
   policy: PolicyDecision;
-  opts?: { mode?: "AUTO" | "MANUAL"; valveId?: string };
+  opts?: { mode?: "AUTO" | "MANUAL"; valveId?: string; values?: Record<string, number> };
 }
 
 export interface SelectedComponent {
@@ -84,6 +84,7 @@ interface HmiCopilotValue {
   ask: (text: string) => Promise<void>;
   sendIntent: (intent: CopilotIntentName, extra?: { target?: ScreenTarget; sopId?: string; actionId?: ControlActionId; componentId?: string; componentLabel?: string }) => Promise<void>;
   runControl: (action: string, opts?: { mode?: "AUTO" | "MANUAL"; valveId?: string }) => Promise<void>;
+  applyManualInputs: (values: Record<string, number>) => Promise<void>;
   authorizePending: () => Promise<void>;
   cancelPending: () => void;
 
@@ -114,6 +115,7 @@ const ACTION_TO_ID: Record<string, ControlActionId> = {
   acknowledge: "ACK",
   resolve: "RESOLVE",
   emergency_stop: "EMERGENCY_STOP",
+  set_manual_values: "SET_MANUAL_SETPOINT",
 };
 
 const BUSY_LABEL: Partial<Record<CopilotIntentName, string>> = {
@@ -374,10 +376,15 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
 
   // ---- machine control (through the guardrail) ----
   const applyActionResult = useCallback(
-    (json: { ok: boolean; needsAuth?: boolean; policy?: PolicyDecision; error?: string; feedback?: string; session?: string; payload?: HmiStreamPayload; event?: TimelineEvent }, action: string, opts?: { mode?: "AUTO" | "MANUAL"; valveId?: string }) => {
+    (
+      json: { ok: boolean; needsAuth?: boolean; policy?: PolicyDecision; error?: string; feedback?: string; session?: string; payload?: HmiStreamPayload; event?: TimelineEvent },
+      action: string,
+      opts?: { mode?: "AUTO" | "MANUAL"; valveId?: string; values?: Record<string, number> }
+    ) => {
       if (json.needsAuth && json.policy) {
         const actionId: ControlActionId = action === "valve" ? ((opts?.valveId as ControlActionId) ?? "OPEN_OUTLET") : (ACTION_TO_ID[action] ?? "STOP");
-        setPendingAction({ action, actionId, label: action.replace(/_/g, " "), policy: json.policy, opts });
+        const label = action === "set_manual_values" ? "apply operator inputs" : action.replace(/_/g, " ");
+        setPendingAction({ action, actionId, label, policy: json.policy, opts });
         return;
       }
       if (json.ok) {
@@ -403,6 +410,22 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
         applyActionResult(await r.json(), action, opts);
       } catch {
         flashToast("ACTION FAILED · unable to reach the simulator. Retrying keeps the current state.", "warn");
+      }
+    },
+    [applyActionResult, flashToast]
+  );
+
+  const applyManualInputs = useCallback(
+    async (values: Record<string, number>) => {
+      try {
+        const r = await fetch("/api/hmi/action", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "set_manual_values", source: "operator", session: sessionRef.current, values }),
+        });
+        applyActionResult(await r.json(), "set_manual_values", { values });
+      } catch {
+        flashToast("ACTION FAILED · unable to reach the simulator.", "warn");
       }
     },
     [applyActionResult, flashToast]
@@ -672,6 +695,7 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
     ask,
     sendIntent,
     runControl,
+    applyManualInputs,
     authorizePending,
     cancelPending,
     goldenNext,
