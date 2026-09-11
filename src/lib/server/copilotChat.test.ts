@@ -282,3 +282,88 @@ test("device context: every device answers telemetry and status questions as its
     assert.match(alarm.reply, new RegExp(a.label), `${id} alarm`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// FINAL COPILOT-ONLY AMENDMENT — conversational follow-ups, ambiguous
+// language routed to Groq (never invented answers), safety preserved
+// ---------------------------------------------------------------------------
+
+test("'why do you think that' is answered as a grounded cause explanation, not a generic redirect", async () => {
+  const history = [
+    { role: "operator" as const, text: "Why is the temperature high?" },
+    { role: "copilot" as const, text: "Reduced cooling performance is the likely cause." },
+  ];
+  const r = await ask("P-101", "Why do you think that?", { history });
+  assert.equal(r.intent, "explain_event");
+  const ctx = liveCtx("P-101");
+  assert.match(r.reply, new RegExp(String(ctx.processValues.find((p) => p.id === "temperature")!.value)));
+});
+
+test("'okay stop it' is recognised as a control request, not swallowed as small talk", async () => {
+  const r = await ask("P-101", "Okay, stop it.");
+  assert.equal(r.intent, "propose_control_action");
+  assert.equal(r.proposedAction?.actionId, "STOP");
+  assert.match(r.reply, /guardrail|authoriz/i);
+});
+
+test("'stop it' alone is also recognised as a control request", async () => {
+  const r = await ask("M-201", "Stop it.");
+  assert.equal(r.intent, "propose_control_action");
+  assert.equal(r.proposedAction?.actionId, "STOP");
+});
+
+test("classifyChat never claims a control phrase as small talk", () => {
+  for (const text of ["okay stop it", "ok, stop it", "alright, stop it now"]) {
+    assert.equal(classifyChat(text), null, text);
+  }
+});
+
+test("ambiguous natural language ('what about the motor?') is not treated as off-topic and gets a grounded, non-fabricated answer", async () => {
+  const r = await ask("M-201", "What about the motor?");
+  assert.equal(r.intent, "ask");
+  assert.equal(r.source, "engine"); // no GROQ_API_KEY in this test — deterministic fallback, never fabricated
+  assert.match(r.reply, /Drive Motor M-201/);
+});
+
+test("a message with no machine relevance and no prior conversation still gets the short off-topic redirect (not sent to Groq)", async () => {
+  const r = await ask("T-501", "What's your favorite movie?");
+  assert.equal(r.intent, "general_chat");
+  assert.match(r.reply, /outside my industrial hmi role/i);
+});
+
+test("a bare pronoun only becomes 'plausibly relevant' once there is conversation history to anchor it", async () => {
+  const bare = await ask("P-101", "What about that?");
+  assert.equal(bare.intent, "general_chat", "no history yet — nothing for 'that' to refer to");
+
+  const withHistory = await ask("P-101", "What about that?", {
+    history: [
+      { role: "operator", text: "Why is the temperature high?" },
+      { role: "copilot", text: "Reduced cooling performance is the likely cause." },
+    ],
+  });
+  assert.notEqual(withHistory.intent, "general_chat", "a pronoun following a real exchange is plausibly relevant");
+});
+
+test("active workflow context (golden-path) makes a short continuation phrase plausibly relevant, never off-topic", async () => {
+  const r = await ask("P-101", "ok proceed", { workflow: "golden-path" });
+  assert.notEqual(r.intent, "general_chat");
+});
+
+test("device context is preserved through the ambiguous-language path: never falls back to P-101", async () => {
+  const r = await ask("C-301", "What about the belt?");
+  // "belt" resolves to a direct telemetry match (belt speed) on C-301 — a
+  // better outcome than the generic ambiguous-fallback bucket, and proof the
+  // device context is correct either way.
+  assert.ok(r.intent === "ask" || r.intent === "telemetry_query", r.intent);
+  assert.match(r.reply, /Transfer Conveyor C-301/);
+  assert.doesNotMatch(r.reply, /Pump Station P-101/);
+});
+
+test("control safety holds even when the request is phrased conversationally: never allowed without operator authorization", async () => {
+  for (const text of ["Stop it.", "Okay, stop it.", "Do that — stop the machine."]) {
+    const r = await ask("P-101", text);
+    if (r.intent === "propose_control_action") {
+      assert.equal(r.proposedAction?.policy.requiresOperatorAuth, true, text);
+    }
+  }
+});

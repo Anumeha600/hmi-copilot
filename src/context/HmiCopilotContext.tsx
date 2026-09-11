@@ -395,16 +395,6 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
     [applyResponse]
   );
 
-  const ask = useCallback(
-    async (text: string) => {
-      const t = text.trim();
-      if (!t) return;
-      setConversation((c) => [...c, { role: "operator", text: t, at: Date.now() }]);
-      await postCopilot("ask", { text: t });
-    },
-    [postCopilot]
-  );
-
   const sendIntent = useCallback(
     async (intent: CopilotIntentName, extra?: { target?: ScreenTarget; sopId?: string; actionId?: ControlActionId; componentId?: string; componentLabel?: string }) => {
       const labels: Partial<Record<CopilotIntentName, string>> = {
@@ -540,6 +530,56 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
       return prev;
     });
   }, [goldenPath, applyGoldenStep]);
+
+  const ask = useCallback(
+    async (text: string) => {
+      const t = text.trim();
+      if (!t) return;
+
+      // A Golden Path is a step-by-step client-side workflow — the server has
+      // no notion of which step is currently active, so a natural
+      // continuation ("ok proceed", "done", "what next?") or a request to
+      // explain the current step is handled directly here, against the real
+      // step data already on screen, using the existing goldenNext()/
+      // goldenPath state (not a new implementation of the golden path itself).
+      if (goldenPath) {
+        const q = t.toLowerCase().replace(/[!.?]+$/, "");
+        const step = goldenPath.steps[goldenStep];
+        const wantsWhy = /^(why|why\?|why is that|why this( step)?|explain( this)?( step)?)$/.test(q);
+        const wantsNext = /^(ok|okay|yes|yeah|sure|proceed|ok proceed|okay proceed|continue|go on|go ahead|next|next step|what next|what'?s next|done|finished|complete|do it|do that)\b/.test(q);
+        if (wantsWhy && step) {
+          setConversation((c) => [
+            ...c,
+            { role: "operator", text: t, at: Date.now() },
+            { role: "copilot", text: `Step ${goldenStep + 1} of ${goldenPath.steps.length}: ${step.instruction}`, at: Date.now() },
+          ]);
+          return;
+        }
+        if (wantsNext) {
+          setConversation((c) => [...c, { role: "operator", text: t, at: Date.now() }]);
+          const isLast = goldenStep >= goldenPath.steps.length - 1;
+          if (isLast) {
+            setConversation((c) => [
+              ...c,
+              { role: "copilot", text: `That was the final step. Golden Path complete — acknowledge the alarm when you're ready, or ask me anything else.`, at: Date.now() },
+            ]);
+          } else {
+            const next = goldenPath.steps[goldenStep + 1];
+            goldenNext();
+            setConversation((c) => [
+              ...c,
+              { role: "copilot", text: `Proceeding with the Golden Path. Step ${goldenStep + 2} of ${goldenPath.steps.length}: ${next?.instruction ?? ""}`, at: Date.now() },
+            ]);
+          }
+          return;
+        }
+      }
+
+      setConversation((c) => [...c, { role: "operator", text: t, at: Date.now() }]);
+      await postCopilot("ask", { text: t });
+    },
+    [postCopilot, goldenPath, goldenStep, goldenNext]
+  );
 
   const goldenExit = useCallback(() => {
     setGoldenPath(null);

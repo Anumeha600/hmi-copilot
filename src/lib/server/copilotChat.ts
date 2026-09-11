@@ -61,7 +61,25 @@ function isRunning(ctx: MachineContext) {
 /** Words that mean "this is about the machine" — used to keep small talk and
  *  the machine domain apart. */
 export const MACHINE_HINT =
-  /\b(temp|temperature|pressure|current|amp|amps|amperage|rpm|speed|vibration|vibe|load|torque|level|flow|coolant|cooling|valve|alarm|fault|trip|interlock|run|running|stopp?ed|start|motor|pump|conveyor|compressor|tank|belt|jam|discharge|inlet|outlet|suction|setpoint|set ?point|sop|golden ?path|root ?cause|evidence|status|incident|overheat|overload|overcurrent|resolve|acknowledge)\b/i;
+  /\b(temp|temperature|pressure|current|amp|amps|amperage|rpm|speed|vibration|vibe|load|torque|level|flow|coolant|cooling|valve|alarm|fault|trip|interlock|run|running|stop|stopp?ed|start|motor|pump|conveyor|compressor|tank|belt|jam|discharge|inlet|outlet|suction|setpoint|set ?point|sop|golden ?path|root ?cause|evidence|status|incident|overheat|overload|overcurrent|resolve|acknowledge)\b/i;
+
+/**
+ * Is a free-text message plausibly about the machine or the active workflow,
+ * even when nothing matched a specific pattern? This is the gate between a
+ * short off-topic redirect and letting the reasoner (deterministic, or Groq
+ * when it's actually available) attempt a grounded answer — deliberately a
+ * small relevance check, not another regex bank per intent.
+ */
+export function isPlausiblyRelevant(text: string, hasActiveWorkflow: boolean, hasHistory: boolean): boolean {
+  const q = text.trim().toLowerCase();
+  if (MACHINE_HINT.test(q) || hasActiveWorkflow) return true;
+  if (!hasHistory) return false;
+  // A bare pronoun or a short continuation ("ok", "proceed", "done") only
+  // means something once there is a preceding turn to anchor it to.
+  const pronounRef = /\b(it|that|this|there|they|them)\b/.test(q);
+  const continuation = /^(ok|okay|yes|yeah|sure|proceed|continue|go on|go ahead|next|done|finished|complete|got it|do it|do that)\b/.test(q);
+  return pronounRef || continuation;
+}
 
 // ---------------------------------------------------------------------------
 // 1. general chat

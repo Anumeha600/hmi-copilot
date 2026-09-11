@@ -22,7 +22,7 @@ import {
   chatReply,
   classifyChat,
   detectControlRequest,
-  MACHINE_HINT,
+  isPlausiblyRelevant,
   offTopicReply,
   resolveFollowUp,
   type ChatTurn,
@@ -179,7 +179,7 @@ interface FreeTextRoute {
   fromControlDetection?: boolean;
 }
 
-function routeFreeText(text: string, ctx: LiveContext, history: ChatTurn[] = []): FreeTextRoute {
+function routeFreeText(text: string, ctx: LiveContext, history: ChatTurn[] = [], workflow?: string | null): FreeTextRoute {
   const q = text.toLowerCase();
   const dg = ctx.__diagnosis;
   const alarm = activeAlarm(ctx);
@@ -283,9 +283,15 @@ function routeFreeText(text: string, ctx: LiveContext, history: ChatTurn[] = [])
     };
   }
 
-  // clearly not about the machine and not a chat pattern we recognised — a
-  // short, honest redirect instead of dumping unrelated alarm telemetry.
-  if (!MACHINE_HINT.test(q)) {
+  // Nothing matched a specific machine phrasing. If the message is plausibly
+  // about the machine or the current workflow (ambiguous natural language —
+  // "what about the motor?", a pronoun following recent conversation, an
+  // active workflow), hand it to the reasoner below as "ask": with Groq
+  // configured that means a genuinely conversational, context-grounded
+  // answer instead of another regex; without Groq it still gets the
+  // deterministic summary. Only a message with nothing to anchor it to gets
+  // the short off-topic redirect.
+  if (!isPlausiblyRelevant(text, Boolean(workflow), history.length > 0)) {
     return { intent: "general_chat", reply: offTopicReply(ctx) };
   }
 
@@ -349,7 +355,7 @@ function deterministicReply(intent: CopilotIntentName, req: CopilotRequest, ctx:
     case "telemetry_query":
       return answerTelemetry(req.text ?? "", ctx) ?? `${ctx.machine.name} — ask about a specific value such as temperature, pressure, speed or level.`;
     default:
-      return routeFreeText(req.text ?? "", ctx, req.history).reply;
+      return routeFreeText(req.text ?? "", ctx, req.history, req.workflow).reply;
   }
 }
 
@@ -415,7 +421,7 @@ export async function runCopilot(req: CopilotRequest, ctx: LiveContext): Promise
   let chatControl: FreeTextRoute["control"];
   let fromControlDetection = false;
   if (req.intent === "ask") {
-    const routed = routeFreeText(req.text ?? "", ctx, history);
+    const routed = routeFreeText(req.text ?? "", ctx, history, req.workflow);
     intent = routed.intent;
     target = routed.target ?? target;
     routedReply = routed.reply;
@@ -505,10 +511,15 @@ export async function runCopilot(req: CopilotRequest, ctx: LiveContext): Promise
   }
 
   // Central-AI enrichment ONLY for the intents that genuinely need natural
-  // language, multi-signal reasoning. General chat, telemetry lookups, status,
-  // summaries, SOP/golden-path/replay and control proposals are all answered
-  // deterministically above — no Groq call, no token cost, no latency.
-  const CENTRAL = new Set<CopilotIntentName>(["explain_event", "show_root_cause", "shift_handover", "explain_component", "why_highlighted"]);
+  // language, multi-signal reasoning, plus the residual "ask" bucket — free
+  // text that matched no specific machine phrasing but passed the
+  // isPlausiblyRelevant() gate above (e.g. "what about the motor?", a
+  // pronoun anchored to recent conversation). That is the ambiguous-language
+  // case Groq is for; general chat, telemetry lookups, status, summaries,
+  // SOP/golden-path/replay and control proposals are all resolved to their
+  // own definitive intent earlier and are answered deterministically — no
+  // Groq call, no token cost, no latency.
+  const CENTRAL = new Set<CopilotIntentName>(["ask", "explain_event", "show_root_cause", "shift_handover", "explain_component", "why_highlighted"]);
   if (CENTRAL.has(intent) && hasLLM) {
     // Send only what the answer needs — related values, not the whole tag list.
     const relatedIds = new Set<string>([...(alarm?.relatedProcessValueIds ?? []), ...(dg.rootCause?.rationale ? [] : [])]);
