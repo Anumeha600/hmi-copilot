@@ -1,110 +1,875 @@
-# HMI COPILOT
+# HMI Copilot
 
-**A context-aware industrial HMI Copilot. It reads a machine's live context, investigates events, explains what it found, guides the operator through resolution, and adapts the HMI at runtime — with every AI-assisted control action held behind a safety & policy guardrail and operator authorization.**
+### AI-Powered Runtime HMI for Visualization, Investigation & Control of Industrial Machines
+
+**Team:** First Byte  
+**Members:** Sarthak V K · Anumeha Paul  
+**Hackathon:** Schneider Electric HMI Hackathon — PS2: Dynamic Screen at Runtime for Visualization & Control of Machines via HMI
+
+🌐 **Live Demo:** https://hmi-copilot.vercel.app/hmi
 
 ---
 
-## What it is
+## 🚀 Overview
 
-HMI Copilot replaces "navigate a wall of predefined screens" with "ask for what you need, and the HMI assembles it from the machine's current context." The reference machine is **Pump Station P-101**, seeded with a real operating problem: the pump is running normally on pressure and flow, but discharge temperature has drifted above its 65 °C limit.
+**HMI Copilot** is an AI-powered industrial Human-Machine Interface designed to help operators understand, investigate, and respond to machine conditions in real time.
 
-The main screen (`/hmi`) is three columns:
+Traditional HMIs primarily display machine values, alarms, and fixed screens. Operators still have to interpret the information, identify the likely cause, search for procedures, and decide what to do next.
 
-| Column | Role |
-|---|---|
-| **Machine Context** | Live process values, active alarm, PLC tags / I/O / asset hierarchy, and a compact contextual machine view |
-| **AI Copilot** | Task routing (edge vs central), activity, current event, context analysis, likely cause + confidence, recommended action, Copilot output, and an "ask" box |
-| **Dynamic HMI** | A screen generated at runtime from a structured definition — status, the values that matter, the alarm, controls, guidance |
+HMI Copilot adds an intelligent contextual layer on top of the HMI.
 
-The operating loop the UI makes visible: **Machine State → AI Understands → AI Investigates → AI Guides → HMI Adapts.**
+Instead of simply showing:
 
-## Architecture
+> "Motor Temperature High"
 
-```
-Machine Context Model
-  → Edge Context Engine        deterministic rules — alarm classification, SOP mapping,
-  │                            state recognition, context filtering, screen generation
-  → Central AI reasoning       LLM (optional) — phrasing of multi-variable explanations only
-  → Dynamic HMI definition     structured screen data (HmiScreenDefinition)
-  → HMI Renderer               low-compute rendering; runs no inference
-```
+the system can help answer:
 
-- **Edge / Central task routing** (`lib/server/taskRouter.ts`) — simple tasks stay on the local deterministic engine; complex reasoning routes to the central AI when a key is configured, and falls back to the edge engine cleanly when it isn't.
-- **The server owns the machine.** `lib/server/hmiEngine.ts` is a `globalThis`-guarded singleton that ticks Pump Station P-101 once a second, runs the context engine, records DVR frames, and broadcasts over Server-Sent Events. The browser is a thin client.
-- **The LLM never decides.** Numbers, statuses, root cause, and confidence come from deterministic code. Groq, when present, is asked only to phrase a conversational reply under a system prompt that forbids adding or changing any value.
+> **What happened? Why did it happen? What evidence supports it? What should I do next?**
 
-## Capabilities
+The system combines:
 
-- **Event Detection** — the Copilot detects and prioritises the active alarm and classifies its severity.
-- **Root Cause Analysis** — correlates process values and produces a ranked hypothesis (here: reduced cooling performance, pressure & flow normal).
-- **Contextual Guidance** — a recommended action tied to the relevant SOP.
-- **Dynamic HMI** — pump overview, cooling system, and alarm-investigation screens generated from the current context, not hard-coded.
-- **Golden Path Guidance** — the preferred resolution sequence for a recurring condition, walking the operator through the actual controls with a subtle step-by-step highlight (`[ GOLDEN PATH ]`).
-- **Time-Travel Replay / Machine DVR** — compact timestamped state frames and events; scrub the timeline and the Dynamic HMI reconstructs the machine state at that instant (`[ TIME TRAVEL ]`).
-- **Data Reconstruction** — any recorded frame is fed back through the same screen builders to rebuild the HMI for that moment.
-- **AI-Assisted Control** — the Copilot can prepare a control action; it is always held for operator authorization.
-- **Safety & Policy Guardrail** — every control action passes: *AI / operator decision → safety & policy guardrail → operator authorization → machine interlocks & permissives → approved control action.* This is an application-layer gate in front of the simulated control API; it does not replace PLC-level safety functions.
-- **Copilot Explainer** — plain-language answers grounded in the machine context ("Why is the pump overheating?").
+- Machine Context
+- Edge Intelligence
+- AI Reasoning
+- Dynamic HMI Generation
+- Contextual Guidance
+- Golden Path Workflows
+- Time Travel Replay
+- Safety & Policy Guardrails
 
-## Safety naming
+### Core Concept
 
-AI-assisted control here is **operator-authorized and guardrailed**, never autonomous. The UI uses **COPILOT ACTIVE**, **AI-ASSISTED CONTROL**, and **SAFETY & POLICY GUARDRAIL** — not "autopilot".
+```text
+Machine Context
+       ↓
+AI Understands
+       ↓
+AI Investigates
+       ↓
+AI Explains / Guides
+       ↓
+HMI Adapts
 
-## Technology
+🎯 Problem Statement
 
-| Layer | Choice |
-|---|---|
-| Framework | Next.js 16 (App Router) |
-| Language | TypeScript (strict) |
-| Realtime | Server-Sent Events (`GET /api/hmi/stream`) |
-| Persistence | SQLite via `better-sqlite3` (`hmi_events` table for the DVR) |
-| LLM | Groq API — optional, phrasing only |
+Industrial operators are often presented with large amounts of machine data but limited contextual assistance.
 
-No new runtime dependencies were added for the Copilot.
+Common challenges include:
 
-## API
+Alarm overload and alarm prioritization
+Large volumes of real-time process data
+Difficulty identifying the root cause of an event
+Slow interpretation of abnormal machine behavior
+New operators lacking machine-specific knowledge
+Expertise remaining undocumented
+Static HMI screens that do not adapt to the current situation
+Operators needing to manually search through SOPs and historical data
 
-| Route | Purpose |
-|---|---|
-| `GET /api/hmi/stream` | SSE — machine context + context-engine output, one frame per second |
-| `POST /api/hmi/action` | Guardrailed control: `pump_start`, `pump_stop`, `set_mode`, `acknowledge`, `restore_cooling`, `emergency_stop`, `set_screen`. Copilot-critical writes return `needsAuth` until `authorized: true` |
-| `GET /api/hmi/replay` | DVR timeline; `?t=<epochMs>` returns the frame and the reconstructed screen for that instant |
-| `POST /api/copilot` | Intent → `{ reply, screen?, sop?, rootCause?, proposedAction?, goldenPath?, routing, … }` |
+This increases response time and makes machine operation more dependent on individual experience.
 
-## Running locally
+💡 Proposed Solution
 
-Requires Node.js 20+ (Node 24 for `npm test`).
+HMI Copilot introduces an intelligent runtime layer that connects machine context, AI reasoning, and the HMI.
 
-```bash
+1. Event Detection
+
+The system continuously interprets machine telemetry and identifies abnormal conditions and important events.
+
+2. Root Cause Analysis
+
+Instead of only displaying an alarm, the Copilot investigates related machine variables and provides a likely cause with supporting evidence.
+
+3. Contextual Guidance
+
+The system provides machine-specific explanations, SOP information, recommended actions, and next steps.
+
+4. Dynamic HMI
+
+The interface adapts according to the current machine state and operator workflow instead of remaining a completely static screen.
+
+5. Time Travel Replay
+
+Operators can move backward through machine history to understand how an abnormal condition developed.
+
+6. Data Reconstruction
+
+Historical machine context can be reconstructed around an event to help operators understand the sequence of conditions.
+
+7. Golden Path Guidance
+
+The system presents a recommended operational sequence for handling a machine condition.
+
+8. Standardization
+
+Machine knowledge and troubleshooting logic can be represented consistently instead of depending entirely on individual operator experience.
+
+9. AI-Assisted Control
+
+The Copilot can recommend or prepare control actions while respecting safety policies, operator authorization, and existing machine interlocks.
+
+The AI is not designed as an unrestricted autonomous controller.
+
+🏭 Supported Machine Modes
+
+The prototype supports multiple simulated industrial machines:
+
+Machine	Example Context
+Pump Station P-101	Pump, motor, pressure, flow and temperature
+Drive Motor M-201	Motor temperature, speed, torque and current
+Transfer Conveyor C-301	Conveyor speed, load and current
+Air Compressor CP-401	Compressor pressure, temperature and speed
+Buffer Tank T-501	Tank level, inlet/outlet flow and valve position
+
+The machines are currently simulated for demonstration and development.
+
+🧠 Key Features
+Machine Context
+
+HMI Copilot maintains contextual information about the active machine.
+
+The context can include:
+
+Asset hierarchy
+Machine state
+Telemetry
+Process variables
+Alarms
+Events
+Component relationships
+Historical conditions
+Operator actions
+Current workflow
+
+This allows the AI to reason about the machine rather than treating every question as an isolated request.
+
+🤖 AI Copilot
+
+The Copilot provides structured machine explanations.
+
+Typical responses follow:
+
+FINDING
+What is happening?
+
+CAUSE
+What is the likely cause?
+
+EVIDENCE
+What machine data supports the conclusion?
+
+ACTION
+What should the operator consider doing?
+
+NEXT
+What should be checked next?
+
+This keeps AI output operationally useful rather than producing generic conversational responses.
+
+🔍 Explain This Component
+
+Operators can select a machine component and ask the Copilot to explain it.
+
+For example:
+
+Drive Motor
+      ↓
+EXPLAIN THIS COMPONENT
+      ↓
+Machine Context
+      ↓
+Current State
+      ↓
+Relevant Alarm
+      ↓
+AI Explanation
+
+The explanation is tied to the currently selected machine and component.
+
+❓ Why Highlighted?
+
+When the HMI highlights a machine component, the operator can ask:
+
+WHY HIGHLIGHTED?
+
+The Copilot explains why that component is relevant to the current machine condition.
+
+This creates a direct relationship between:
+
+Machine Visualization
+        ↓
+Highlighted Component
+        ↓
+Machine Context
+        ↓
+AI Explanation
+🚨 RUN INCIDENT
+
+The prototype includes a controlled incident simulation for demonstration.
+
+When the operator selects:
+
+RUN INCIDENT
+
+the selected demo machine develops a simulated abnormal condition.
+
+The workflow is:
+
+RUN INCIDENT
+      ↓
+Abnormal Telemetry
+      ↓
+Alarm / Event
+      ↓
+Machine Context Update
+      ↓
+AI Investigation
+      ↓
+Dynamic HMI Adaptation
+      ↓
+Component Highlight
+      ↓
+Golden Path / SOP Guidance
+
+This allows the complete HMI Copilot workflow to be demonstrated without requiring a physical industrial machine.
+
+⚙️ AUTO / MANUAL Modes
+AUTO
+
+In AUTO mode, the machine simulator automatically evolves its telemetry and process behavior.
+
+This demonstrates how HMI Copilot can continuously interpret machine conditions.
+
+MANUAL
+
+In MANUAL mode, the operator can provide machine inputs through the HMI.
+
+Examples include:
+
+Temperature
+Speed
+Pressure
+Flow
+Torque
+Current
+Load
+Level
+Valve position
+
+The inputs are validated against machine limits.
+
+Unsafe values trigger the Safety & Policy Guardrail instead of being silently accepted.
+
+🖥️ Dynamic HMI
+
+The HMI is designed as a runtime workspace rather than a conventional static dashboard.
+
+The primary workspace is divided into three areas:
+
+┌──────────────────────────────────────────────────────────────┐
+│                       HMI COPILOT                            │
+├──────────────────┬──────────────────────┬────────────────────┤
+│                  │                      │                    │
+│ MACHINE CONTEXT  │    AI COPILOT       │   DYNAMIC HMI      │
+│                  │                      │                    │
+│ • Machine        │ • Investigation     │ • Machine View     │
+│ • Telemetry      │ • Explanation       │ • Controls         │
+│ • Alarms         │ • Root Cause        │ • Dynamic Panels   │
+│ • Events         │ • Guidance          │ • Component Focus  │
+│                  │                      │                    │
+└──────────────────┴──────────────────────┴────────────────────┘
+🏗️ Machine Visualization
+
+The HMI includes an interactive 2.5D/3D-style machine visualization.
+
+Operators can:
+
+Zoom
+Orbit
+Pan
+Reset
+Fit the machine view
+Hover over components
+Select components
+Highlight alarm-related components
+View component-specific information
+
+The visualization is connected to the machine context and Copilot workflow.
+
+📋 SOP & Golden Path
+SOP
+
+Standard Operating Procedure represents the approved step-by-step procedure for handling a machine condition.
+
+Golden Path
+
+The Golden Path represents the recommended operational sequence for efficiently responding to a specific condition.
+
+Conceptually:
+
+Machine Event
+     ↓
+AI Investigation
+     ↓
+Recommended Golden Path
+     ↓
+Operator Guidance
+     ↓
+Verified Action
+⏪ Time Travel Replay
+
+Time Travel allows operators to investigate historical machine behavior.
+
+Instead of looking only at the current machine state:
+
+CURRENT STATE
+     ↓
+What happened before?
+     ↓
+Previous telemetry
+     ↓
+Previous alarms
+     ↓
+Event progression
+     ↓
+Root-cause investigation
+
+This helps operators understand how a fault developed rather than only seeing its final state.
+
+🛡️ Safety & Policy Guardrails
+
+Industrial control requires stronger safeguards than ordinary AI applications.
+
+HMI Copilot therefore separates AI reasoning from unrestricted machine control.
+
+The conceptual architecture is:
+
+Operator
+   ↓
+HMI
+   ↓
+AI Recommendation
+   ↓
+Safety & Policy Guardrail
+   ↓
+Operator Authorization
+   ↓
+Existing PLC / Machine Interlocks
+   ↓
+Control Action
+
+The Copilot does not bypass machine safety mechanisms.
+
+Unsafe or invalid operator inputs are rejected or routed through the guardrail workflow.
+
+🧩 System Architecture
+┌─────────────────────────────────────────────────────────────┐
+│                  INDUSTRIAL DATA SOURCES                    │
+│                                                             │
+│ PLC Tags │ I/O │ Alarms │ Process Logs │ Asset Hierarchy   │
+│ Documents │ Events │ Operator Actions                      │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│                  MACHINE CONTEXT MODEL                      │
+│                                                             │
+│ Machine State │ Telemetry │ Events │ Components │ History  │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│               EDGE INTELLIGENCE / CONTEXT ENGINE            │
+│                                                             │
+│ Rules │ Event Detection │ Context Processing │ Validation  │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                ┌──────────────┴──────────────┐
+                │                             │
+                ▼                             ▼
+┌───────────────────────────┐     ┌───────────────────────────┐
+│     LOW-COMPUTE HMI       │     │    CENTRAL AI SERVER      │
+│                           │     │                           │
+│ Runtime Visualization     │     │ LLM Reasoning             │
+│ Machine Controls          │     │ Root Cause Analysis       │
+│ Local Context             │     │ Natural Language          │
+└──────────────┬────────────┘     └──────────────┬────────────┘
+               │                                 │
+               └────────────────┬────────────────┘
+                                ▼
+                 ┌──────────────────────────┐
+                 │      DYNAMIC HMI         │
+                 │                          │
+                 │ Visualization            │
+                 │ Guidance                 │
+                 │ Golden Path              │
+                 │ Time Travel              │
+                 │ AI Copilot               │
+                 └──────────────────────────┘
+🔄 Runtime Workflow
+1. Machine generates telemetry
+              ↓
+2. Context Engine interprets machine state
+              ↓
+3. Event / anomaly is detected
+              ↓
+4. Relevant machine components are identified
+              ↓
+5. Copilot investigates available context
+              ↓
+6. AI generates explanation and evidence
+              ↓
+7. HMI dynamically adapts
+              ↓
+8. Relevant component is highlighted
+              ↓
+9. Operator receives contextual guidance
+              ↓
+10. Guardrails validate control actions
+              ↓
+11. Machine context updates
+              ↓
+12. HMI continues adapting
+🧠 Edge-First AI Architecture
+
+HMI Copilot follows an edge-first design philosophy.
+
+Not every operation requires a large language model.
+
+                 MACHINE DATA
+                      │
+                      ▼
+              ┌───────────────┐
+              │ EDGE CONTEXT  │
+              │    ENGINE     │
+              └───────┬───────┘
+                      │
+          ┌───────────┴───────────┐
+          │                       │
+          ▼                       ▼
+   Deterministic Tasks       AI Tasks
+   ─────────────────        ──────────
+   • Thresholds             • Explanation
+   • Alarms                 • Investigation
+   • State                  • Root Cause
+   • Validation             • Natural Language
+   • Context                • Guidance
+          │                       │
+          └───────────┬───────────┘
+                      ▼
+                 DYNAMIC HMI
+
+This reduces unnecessary AI calls and allows lightweight operations to remain close to the HMI/edge.
+
+🧰 Technology Stack
+Frontend
+React
+Next.js
+TypeScript
+Dynamic SVG HMI
+Interactive machine visualization
+Backend
+Node.js
+Next.js API Routes
+REST APIs
+Session-scoped runtime state
+AI
+Generative AI / LLM
+Groq API
+openai/gpt-oss-120b
+Edge-first deterministic context engine
+Data
+Machine telemetry
+PLC tags
+I/O
+Alarms
+Process logs
+Asset hierarchy
+Event history
+Industrial Integration Targets
+
+The architecture is designed to integrate with industrial protocols and systems such as:
+
+OPC UA
+Modbus TCP
+MQTT
+REST APIs
+PLC tag systems
+
+Current hackathon prototype: machine data is simulated. Live PLC connectivity is an integration target and is not falsely represented as implemented.
+
+📁 Project Structure
+hmi-copilot/
+│
+├── src/
+│   ├── app/
+│   │   ├── api/
+│   │   │   ├── copilot/
+│   │   │   └── hmi/
+│   │   │
+│   │   └── hmi/
+│   │
+│   ├── components/
+│   │   └── hmi/
+│   │       ├── HmiWorkspace
+│   │       ├── MachineContextPanel
+│   │       ├── CopilotPanel
+│   │       ├── DynamicHmiPanel
+│   │       ├── MachineView
+│   │       ├── HmiRenderer
+│   │       └── SafetyGuardrailDialog
+│   │
+│   ├── lib/
+│   │   ├── machineContext/
+│   │   │   ├── model.ts
+│   │   │   ├── pumpStationEngine.ts
+│   │   │   ├── sessionState.ts
+│   │   │   ├── replay.ts
+│   │   │   ├── hmiSchema.ts
+│   │   │   └── goldenPath.ts
+│   │   │
+│   │   └── server/
+│   │       ├── contextEngine.ts
+│   │       ├── copilotReasoner.ts
+│   │       ├── taskRouter.ts
+│   │       ├── safetyPolicy.ts
+│   │       └── hmiEngine.ts
+│   │
+│   └── ...
+│
+├── public/
+├── package.json
+├── README.md
+└── ...
+🔐 Environment Variables
+
+Create a .env.local file in the project root:
+
+GROQ_API_KEY=gsk_your_actual_key_here
+GROQ_MODEL=openai/gpt-oss-120b
+
+The API key must remain server-side.
+
+Never hardcode the API key into frontend code or commit .env.local to GitHub.
+
+💻 Local Development
+1. Clone the repository
+git clone https://github.com/Anumeha600/hmi-copilot.git
+2. Enter the project
+cd hmi-copilot
+3. Install dependencies
 npm install
-npm run dev          # http://localhost:3000  → redirects to /hmi
-```
+4. Configure environment variables
 
-Optionally add a Groq key (the Copilot works fully without one):
+Create:
 
-```bash
-cp .env.example .env.local
-# GROQ_API_KEY=your-key-here
-```
+.env.local
 
-Scripts:
+and add:
 
-```bash
-npm run build   # production build
-npm run start   # run the production build
-npm run lint    # eslint
-npm test        # node --test — Golden Path, task routing, context engine, safety policy, replay
-```
+GROQ_API_KEY=gsk_your_actual_key_here
+GROQ_MODEL=openai/gpt-oss-120b
+5. Start the development server
+npm run dev
+6. Open the HMI
+http://localhost:3000/hmi
+🧪 Testing
 
-## Demo flow
+Run the automated test suite:
 
-Open `/hmi`. The pump is running at ~72 °C with a `HIGH TEMPERATURE` alarm; the Copilot has already read context, correlated values, and proposed *reduced cooling performance*.
+npm test
 
-1. **Edge / central** — the routing strip reads `LOCAL EDGE ✓`. Ask *"Why is the pump overheating?"* → it flips to `CENTRAL AI →`.
-2. **Golden Path** — click `GOLDEN PATH` (or ask *"How do I resolve this?"*). Step through cooling → cooling flow → operating load → temperature → acknowledge; the HMI highlights each control.
-3. **Time Travel** — ask *"What happened before this alarm?"* Drag the timeline; the Dynamic HMI reconstructs 61 °C / no alarm, then 72 °C / alarm.
-4. Ask *"Show me the pump controls"* → HMI regenerates. Press **Stop** → the **Safety & Policy Guardrail** dialog requires authorization before the action runs.
+Build the production application:
 
-## Legacy build
+npm run build
 
-The project's original predictive-maintenance application (live dashboard, digital twin, RUL, engineering report) is archived under `/dashboard`, `/twin`, `/assistant`, `/history`, `/plc`, `/system`. It runs its own dark theme and telemetry engine, is not linked from HMI Copilot's navigation, and is kept only for reference.
+The current verified implementation includes:
+
+63 automated tests
+63 passing
+0 failures
+0 analyzer errors
+☁️ Deployment
+
+The prototype is deployed using Vercel.
+
+Production URL:
+
+https://hmi-copilot.vercel.app/hmi
+
+The project is connected to GitHub and can be automatically deployed from the repository.
+
+Environment variables required for deployment:
+
+GROQ_API_KEY
+GROQ_MODEL
+🎬 Recommended Hackathon Demo Flow
+
+The following flow demonstrates the complete concept quickly.
+
+Step 1 — Open HMI
+
+Open:
+
+https://hmi-copilot.vercel.app/hmi
+Step 2 — Select Machine
+
+Start with:
+
+Pump Station P-101
+
+Show:
+
+machine context
+telemetry
+machine visualization
+Copilot
+dynamic HMI
+Step 3 — Run Incident
+
+Click:
+
+RUN INCIDENT
+
+The machine begins developing a simulated abnormal condition.
+
+Show:
+
+Telemetry changes
+       ↓
+Alarm appears
+       ↓
+Machine context updates
+       ↓
+Relevant component highlighted
+Step 4 — Ask the Copilot
+
+Use:
+
+EXPLAIN THIS COMPONENT
+
+or:
+
+WHY HIGHLIGHTED?
+
+The Copilot provides contextual reasoning.
+
+Step 5 — Show Root Cause
+
+Demonstrate:
+
+FINDING
+CAUSE
+EVIDENCE
+ACTION
+NEXT
+
+This highlights how the system goes beyond a conventional alarm display.
+
+Step 6 — Show Golden Path
+
+Open the recommended workflow and demonstrate how the operator is guided through the response.
+
+Step 7 — Show Time Travel
+
+Move backward through the machine timeline and demonstrate how the operator can reconstruct the sequence leading to the event.
+
+Step 8 — Show Manual Mode
+
+Switch to:
+
+MANUAL
+
+Enter a machine parameter such as:
+
+Temperature
+Speed
+Pressure
+
+Apply the value.
+
+Demonstrate how machine context and the HMI respond.
+
+Step 9 — Demonstrate Safety Guardrail
+
+Enter an unsafe value.
+
+The system should not silently execute it.
+
+Instead:
+
+Operator Input
+      ↓
+Safety Validation
+      ↓
+Guardrail
+      ↓
+Authorization
+      ↓
+Controlled Action
+🏆 Why HMI Copilot?
+
+Traditional HMI:
+
+Machine
+   ↓
+Data
+   ↓
+Alarm
+   ↓
+Operator interprets everything
+
+HMI Copilot:
+
+Machine
+   ↓
+Machine Context
+   ↓
+Event Detection
+   ↓
+Investigation
+   ↓
+AI Explanation
+   ↓
+Contextual Guidance
+   ↓
+Dynamic HMI
+   ↓
+Operator Decision
+
+The goal is not to replace the operator.
+
+The goal is to make the operator faster, better informed, and less dependent on undocumented expertise.
+
+📈 Potential Impact
+
+HMI Copilot is designed to address several industrial challenges:
+
+Reduced Alarm Overload
+
+Prioritizes important events and connects them to machine context.
+
+Faster Troubleshooting
+
+Provides likely causes and supporting evidence instead of forcing operators to manually correlate values.
+
+Better Operator Onboarding
+
+Helps inexperienced operators understand machine behavior through contextual explanations.
+
+Knowledge Preservation
+
+Transforms machine-specific troubleshooting knowledge into reusable workflows and guidance.
+
+Reduced HMI Engineering Effort
+
+Dynamic HMI concepts can reduce dependence on manually creating separate static screens for every possible machine condition.
+
+Improved Decision Support
+
+Provides relevant information at the moment the operator needs it.
+
+🔮 Future Scope
+
+The hackathon prototype can be extended toward real industrial deployment.
+
+Potential future developments include:
+
+Live PLC connectivity
+OPC UA integration
+Modbus TCP integration
+MQTT industrial telemetry
+Real-time historian integration
+Digital twins
+More advanced root-cause reasoning
+Plant-wide asset hierarchy
+Multi-machine Copilot
+Voice-based industrial assistance
+Role-based operator permissions
+Audit trails
+Advanced predictive analytics
+Edge deployment on industrial hardware
+Human-in-the-loop control workflows
+Integration with existing Schneider Electric HMI/automation environments
+🔒 Safety Philosophy
+
+AI should not become an uncontrolled layer between an operator and an industrial machine.
+
+Therefore, HMI Copilot follows:
+
+AI Recommendation
+       ↓
+Policy Validation
+       ↓
+Operator Authorization
+       ↓
+Machine Interlocks
+       ↓
+Controlled Action
+
+The system is designed to support operators while preserving deterministic safety mechanisms.
+
+⚠️ Prototype Disclaimer
+
+HMI Copilot is a hackathon prototype.
+
+The machine behavior and telemetry in the public demo are simulated.
+
+The prototype does not claim to directly control physical industrial equipment or live PLCs.
+
+Industrial deployment would require:
+
+validated PLC integration
+cybersecurity controls
+safety certification where applicable
+deterministic control logic
+operator authorization
+machine-specific interlocks
+industrial testing and validation
+👥 Team
+First Byte
+Sarthak V K
+
+SRM Institute of Science and Technology
+
+Anumeha Paul
+
+SRM Institute of Science and Technology
+
+🏁 Hackathon
+
+Schneider Electric HMI Hackathon
+
+Problem Statement: PS2 — Dynamic Screen at Runtime for Visualization & Control of Machines via HMI
+
+Solution: HMI Copilot
+
+🌐 Links
+
+Live Demo
+
+https://hmi-copilot.vercel.app/hmi
+
+GitHub Repository
+
+https://github.com/Anumeha600/hmi-copilot
+
+💭 Core Idea
+
+Don't just show the operator what the machine is doing. Help the operator understand why, what it means, and what to do next.
+
+              HMI COPILOT
+
+        MACHINE CONTEXT
+               ↓
+        AI UNDERSTANDS
+               ↓
+        AI INVESTIGATES
+               ↓
+        AI EXPLAINS
+               ↓
+        AI GUIDES
+               ↓
+        HMI ADAPTS
+               ↓
+        OPERATOR DECIDES
+Built for the future of intelligent industrial HMIs.
