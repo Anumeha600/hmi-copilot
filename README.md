@@ -1,6 +1,7 @@
 <img width="1600" height="758" alt="WhatsApp Image 2026-09-11 at 5 57 39 AM" src="https://github.com/user-attachments/assets/67f7bd6a-af21-4965-be9c-9b7a55beaf21" />
 
-<img width="1600" height="758" alt="WhatsApp Image 2026-09-11 at 5 57 39 AM" src="https://github.com/user-attachments/assets/7efc44f5-d672-475d-85b0-7b438eafb834" />
+<img width="411" height="814" alt="WhatsApp Image 2026-09-11 at 5 58 24 AM" src="https://github.com/user-attachments/assets/4894603e-c943-41cb-ac53-5e862e647a1d" />
+
 
 # HMI Copilot
 
