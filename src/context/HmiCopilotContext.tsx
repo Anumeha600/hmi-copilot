@@ -135,6 +135,8 @@ const BUSY_LABEL: Partial<Record<CopilotIntentName, string>> = {
   machine_status: "Reading machine state…",
   alarm_summary: "Summarizing incident…",
   next_action: "Selecting next action…",
+  general_chat: "Thinking…",
+  telemetry_query: "Reading live value…",
 };
 
 export function HmiCopilotProvider({ children }: { children: ReactNode }) {
@@ -192,9 +194,17 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
   // most recent one's response is allowed to update the session / UI.
   const deviceSeqRef = useRef(0);
   const [sessionVersion, setSessionVersion] = useState(0);
+  // Lightweight conversation memory sent with every Copilot request, so it can
+  // resolve "it" / "that" / a follow-up without the client repeating context.
+  // A ref (not the state directly) so postCopilot doesn't need `conversation`
+  // as a dependency — it always reads the latest turns at call time.
+  const conversationRef = useRef<ConversationTurn[]>([]);
   useEffect(() => {
     activePanelRef.current = activePanel;
   }, [activePanel]);
+  useEffect(() => {
+    conversationRef.current = conversation;
+  }, [conversation]);
 
   const flashToast = useCallback((text: string, tone: Toast["tone"] = "info") => {
     setToast({ text, tone });
@@ -320,6 +330,15 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
       setMachineFocusAsset(res.focusAssetId);
     }
 
+    // A control request typed in chat ("stop the machine", "set speed to
+    // 1400") is never executed here — it opens the same Safety & Policy
+    // Guardrail dialog a button press would, so the operator still has to
+    // authorize it explicitly.
+    if (res.proposedAction?.action && res.proposedAction.policy.allowed) {
+      const pa = res.proposedAction;
+      setPendingAction({ action: pa.action!, actionId: pa.actionId, label: pa.label, policy: pa.policy, opts: pa.values ? { values: pa.values } : undefined });
+    }
+
     if (res.goldenPath) setActivePanel("golden-path");
     else if (res.openTimeTravel) setActivePanel("replay");
     else if (res.intent === "show_root_cause") setActivePanel("root-cause");
@@ -351,10 +370,11 @@ export function HmiCopilotProvider({ children }: { children: ReactNode }) {
       setCopilotBusy(true);
       setBusyLabel(BUSY_LABEL[intent] ?? "Analyzing machine context…");
       try {
+        const history = conversationRef.current.slice(-10).map((t) => ({ role: t.role, text: t.text }));
         const r = await fetch("/api/copilot", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ intent, session: sessionRef.current, events: eventLogRef.current, workflow: activePanelRef.current, ...extra }),
+          body: JSON.stringify({ intent, session: sessionRef.current, events: eventLogRef.current, workflow: activePanelRef.current, history, ...extra }),
         });
         const json = (await r.json()) as CopilotResponse & { replay?: ReplayData; ok: boolean };
         if (seq !== copilotSeqRef.current) return; // a newer request has been issued — discard this one

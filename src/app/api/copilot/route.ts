@@ -23,6 +23,8 @@ const VALID_INTENTS = new Set([
   "machine_status",
   "alarm_summary",
   "next_action",
+  "general_chat",
+  "telemetry_query",
 ]);
 
 export async function POST(request: Request) {

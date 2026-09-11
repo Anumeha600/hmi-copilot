@@ -39,6 +39,8 @@ const EDGE_TASK_LABELS: Partial<Record<CopilotIntentName, string>> = {
   alarm_summary: "Alarm classification + evidence",
   next_action: "Recommended-action lookup",
   ask: "Machine-state recognition + context filtering",
+  general_chat: "Conversational reply",
+  telemetry_query: "Live value lookup",
 };
 
 const CENTRAL_TASK_LABELS: Partial<Record<CopilotIntentName, string>> = {

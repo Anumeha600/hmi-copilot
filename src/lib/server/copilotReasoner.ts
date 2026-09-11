@@ -17,6 +17,16 @@ import type { GoldenPath } from "@/lib/goldenPath";
 import { buildAlarmInvestigationScreen, buildOverviewScreen, buildScreenByHint, buildSubsystemScreen } from "./contextEngine";
 import { evaluateControlAction, type ControlActionId, type PolicyDecision } from "./safetyPolicy";
 import { classifyTask, type TaskRouting } from "./taskRouter";
+import {
+  answerTelemetry,
+  chatReply,
+  classifyChat,
+  detectControlRequest,
+  MACHINE_HINT,
+  offTopicReply,
+  resolveFollowUp,
+  type ChatTurn,
+} from "./copilotChat";
 
 const GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions";
 const DEFAULT_MODEL = "openai/gpt-oss-120b";
@@ -36,7 +46,9 @@ export type CopilotIntentName =
   | "why_highlighted"
   | "machine_status"
   | "alarm_summary"
-  | "next_action";
+  | "next_action"
+  | "general_chat"
+  | "telemetry_query";
 
 export type ScreenTarget = "overview" | "subsystem" | "alarm_investigation";
 
@@ -50,12 +62,18 @@ export interface CopilotRequest {
   componentLabel?: string;
   /** current UI workflow phase — keeps free-text answers focused on the active incident */
   workflow?: "investigation" | "root-cause" | "sop" | "golden-path" | "replay" | null;
+  /** lightweight conversation memory — the last few turns, for reference resolution */
+  history?: ChatTurn[];
 }
 
 export interface ProposedControlAction {
   actionId: ControlActionId;
   label: string;
   policy: PolicyDecision;
+  /** the /api/hmi/action `action` string the client authorizes (chat-originated control) */
+  action?: string;
+  /** operator setpoint values for `action: "set_manual_values"` */
+  values?: Record<string, number>;
 }
 
 export interface CopilotResponse {
@@ -153,14 +171,31 @@ interface FreeTextRoute {
   intent: CopilotIntentName;
   reply: string;
   target?: ScreenTarget;
+  /** chat-originated control request — routed to the guardrail, never executed here */
+  control?: { actionId: ControlActionId; action: string; values?: Record<string, number> };
+  /** true when this route came from the control-request detector (even when it
+   *  resolved to "already running" / "already stopped" rather than a proposal) —
+   *  its reply is final and should not be recomputed by deterministicReply. */
+  fromControlDetection?: boolean;
 }
 
-function routeFreeText(text: string, ctx: LiveContext): FreeTextRoute {
+function routeFreeText(text: string, ctx: LiveContext, history: ChatTurn[] = []): FreeTextRoute {
   const q = text.toLowerCase();
   const dg = ctx.__diagnosis;
   const alarm = activeAlarm(ctx);
   const d = driverPv(ctx);
   const focus = (dg.machineView.focusLabel ?? "subsystem").toLowerCase();
+  const copilotTurns = history.filter((t) => t.role === "copilot").length;
+
+  // ---- conversation layer, part 1: general chat / control ----
+  // These run first, before anything machine-specific: a greeting or a control
+  // request is never misread as a value lookup, and general chat never spills
+  // machine telemetry.
+  const chat = classifyChat(text);
+  if (chat) return { intent: "general_chat", reply: chatReply(chat, ctx, copilotTurns) };
+
+  const control = detectControlRequest(text, ctx);
+  if (control) return { intent: control.intent, reply: control.reply ?? "", target: control.target, control: control.control, fromControlDetection: true };
 
   if (alarm && new RegExp(`(${focus.split(" ")[0]}|cooling|valve|belt|coupling|load|discharge|outlet|inlet)`).test(q) && /(show|view|open)/.test(q)) {
     return { intent: "generate_screen", target: "subsystem", reply: `Generated the ${focus} view from its related tags and the SOP for this condition.` };
@@ -168,7 +203,7 @@ function routeFreeText(text: string, ctx: LiveContext): FreeTextRoute {
   if (/(related to this alarm|everything|all values|alarm view|investigat|evidence)/.test(q)) {
     return { intent: "generate_screen", target: "alarm_investigation", reply: "Alarm investigation view generated — the alarm, its related process values, the ranked root cause and the recommended action." };
   }
-  if (/(status|overview|show me the (pump|motor|conveyor|compressor|tank)|controls|current)/.test(q) && /(show|controls|status|overview)/.test(q)) {
+  if (/(status|overview|show me the (pump|motor|conveyor|compressor|tank)|controls|current)/.test(q) && /(show|display|open|view)/.test(q)) {
     return { intent: "generate_screen", target: "overview", reply: `${dg.deviceKind} overview generated from the current machine context.` };
   }
   if (/(root cause|why did|likely cause|caused)/.test(q)) {
@@ -179,7 +214,7 @@ function routeFreeText(text: string, ctx: LiveContext): FreeTextRoute {
         : "No active alarm to investigate.",
     };
   }
-  if (/(resolve|fix|stabilize|clear this|what should i|what do i do|how do i|walk me through|step by step|guide me|safest way)/.test(q)) {
+  if (/(resolve|fix|stabilize|clear this|what should i|what do i do|how do i|walk me through|step by step|guide me|safest way|golden ?path|recommended sequence)/.test(q)) {
     return {
       intent: "golden_path",
       reply: alarm
@@ -196,13 +231,13 @@ function routeFreeText(text: string, ctx: LiveContext): FreeTextRoute {
   if (/(previous shift|last shift|handover)/.test(q)) {
     return { intent: "shift_handover", reply: `Prepared a shift handover summary for ${ctx.machine.name}.` };
   }
-  if (/(machine status|is it running|running or stopped|current state|what state|what mode|is it stopped|is it running)/.test(q)) {
+  if (/(machine status|is (it|the machine) (running|stopped)|running or stopped|current state|current status|what state|what mode|is it stopped|is it running|operational)/.test(q)) {
     return { intent: "machine_status", reply: machineStatusLine(ctx) };
   }
   if (/(summar|what.?s wrong|whats wrong|brief|tl.?dr|quick rundown|the situation|last 30|last thirty)/.test(q)) {
     return { intent: "alarm_summary", reply: alarmSummaryBlock(ctx) };
   }
-  if (/(next step|what next|what.?s next|what should i do next|best action|next best)/.test(q)) {
+  if (/(next step|what next|what.?s next|what should i do|what do i check|what should i check|how should i respond|how do i respond|best action|next best)/.test(q)) {
     return { intent: "next_action", reply: nextActionLine(ctx) };
   }
   if (/why.*(highlight|flagged|selected|marked|focused)/.test(q)) {
@@ -220,11 +255,38 @@ function routeFreeText(text: string, ctx: LiveContext): FreeTextRoute {
             : `${ctx.machine.name} is within limits. A start would still require your authorization at the safety guardrail.`,
     };
   }
-  if (alarm && d && /(why|high|rising|increasing|low|falling|overcurrent|overload|jam|pressure|temperature|level|hot)/.test(q)) {
+  // Causal / qualitative language ("why", "rising", "problem") routes to the
+  // root-cause explanation. A bare value name alone ("temperature", "pressure")
+  // is NOT causal — that is a plain lookup and belongs to the telemetry layer
+  // below, so it is deliberately excluded here.
+  if (alarm && d && /(why|rising|increasing|falling|overcurrent|overload|problem|serious|concern|worse|trend|getting worse|is (that|this|it).*(normal|ok\b|okay|fine))/.test(q)) {
     return {
       intent: "explain_event",
       reply: `${d.label} is ${d.value} ${d.unit}, ${alarm.limit != null && d.value > alarm.limit ? "exceeding" : "outside"} the ${alarm.limit} ${d.unit} limit. Edge hypothesis: ${dg.rootCause?.cause.toLowerCase()}.`,
     };
+  }
+
+  // ---- conversation layer, part 2: deterministic telemetry + follow-ups ----
+  // Nothing above matched an explicit machine phrasing — try a direct value
+  // lookup, then conversational reference resolution ("show me", "which
+  // component", "is it still running", pronouns), before giving up.
+  const telemetry = answerTelemetry(text, ctx);
+  if (telemetry) return { intent: "telemetry_query", reply: telemetry };
+
+  const followUp = resolveFollowUp(text, ctx, history);
+  if (followUp) {
+    return {
+      intent: followUp.intent,
+      // resolved to a machine intent but left the wording to the reasoner
+      reply: followUp.reply ?? deterministicReply(followUp.intent, { intent: followUp.intent, text }, ctx),
+      target: followUp.target,
+    };
+  }
+
+  // clearly not about the machine and not a chat pattern we recognised — a
+  // short, honest redirect instead of dumping unrelated alarm telemetry.
+  if (!MACHINE_HINT.test(q)) {
+    return { intent: "general_chat", reply: offTopicReply(ctx) };
   }
 
   return {
@@ -280,8 +342,14 @@ function deterministicReply(intent: CopilotIntentName, req: CopilotRequest, ctx:
       return nextActionLine(ctx);
     case "why_highlighted":
       return whyHighlightedLine(ctx, req.componentId, req.componentLabel);
+    case "general_chat": {
+      const kind = classifyChat(req.text ?? "");
+      return kind ? chatReply(kind, ctx, (req.history ?? []).filter((t) => t.role === "copilot").length) : offTopicReply(ctx);
+    }
+    case "telemetry_query":
+      return answerTelemetry(req.text ?? "", ctx) ?? `${ctx.machine.name} — ask about a specific value such as temperature, pressure, speed or level.`;
     default:
-      return routeFreeText(req.text ?? "", ctx).reply;
+      return routeFreeText(req.text ?? "", ctx, req.history).reply;
   }
 }
 
@@ -293,11 +361,12 @@ const COPILOT_SYSTEM_PROMPT = `You are an industrial HMI copilot embedded in a p
 
 The machine is running in DEMO / SIMULATION mode — there is NO real PLC or controller connected. Refer to it as the simulated machine or the demo machine. Never say "the PLC is…" or imply a live hardware connection.
 
-You will be given a JSON snapshot of the machine context (device, environment, tags, process values, alarms, edge root-cause hypothesis, recommended action) that a deterministic engine already computed. Every number and every decision in it is final.
+You will be given a JSON snapshot of the machine context (device, environment, tags, process values, alarms, edge root-cause hypothesis, recommended action, and a short recentConversation field — the last few operator/copilot turns) that a deterministic engine already computed. Every number and every decision in it is final.
 
 Rules:
 - NEVER invent, change, or recompute a number, limit, status, confidence, or root cause. Use only what is in the JSON.
 - Refer to the correct machine and its own telemetry (e.g. current/RPM/vibration for a motor, level/flow for a tank) — do not mention values that are not in the JSON.
+- Use recentConversation only to resolve references ("it", "that", "the problem") to what was just discussed — never as a source of new facts.
 - Answer as a control-room engineer would: direct, factual, 1-3 sentences. No pleasantries, no marketing, no emoji, no headings.
 - You cannot operate the machine. You may say an action was "prepared for operator authorization" but never that you executed it.
 - If the JSON shows no active alarm, say the machine is within limits.`;
@@ -338,19 +407,31 @@ async function phraseWithGroq(question: string, snapshot: unknown): Promise<stri
 export async function runCopilot(req: CopilotRequest, ctx: LiveContext): Promise<CopilotResponse> {
   const dg = ctx.__diagnosis;
   const alarm = activeAlarm(ctx);
+  const history = req.history ?? [];
 
   let intent = req.intent;
   let target = req.target;
+  let routedReply: string | undefined;
+  let chatControl: FreeTextRoute["control"];
+  let fromControlDetection = false;
   if (req.intent === "ask") {
-    const routed = routeFreeText(req.text ?? "", ctx);
+    const routed = routeFreeText(req.text ?? "", ctx, history);
     intent = routed.intent;
     target = routed.target ?? target;
+    routedReply = routed.reply;
+    chatControl = routed.control;
+    fromControlDetection = Boolean(routed.fromControlDetection);
   }
 
   const hasLLM = Boolean(process.env.GROQ_API_KEY);
+  // General chat, a direct telemetry lookup, and anything the control-request
+  // detector resolved (a proposal, or "already running" / "already stopped")
+  // already have their final reply text from the deterministic chat layer —
+  // reuse it verbatim instead of recomputing.
+  const useRoutedReply = intent === "general_chat" || intent === "telemetry_query" || fromControlDetection;
   const base: CopilotResponse = {
     intent,
-    reply: deterministicReply(intent, { ...req, intent, target }, ctx),
+    reply: useRoutedReply && routedReply ? routedReply : deterministicReply(intent, { ...req, intent, target }, ctx),
     source: "engine",
     routing: classifyTask(intent, req.text, hasLLM),
     suggestions: dg.suggestions,
@@ -395,6 +476,22 @@ export async function runCopilot(req: CopilotRequest, ctx: LiveContext): Promise
     base.proposedAction = { actionId: req.actionId, label: req.actionId.replace(/_/g, " ").toLowerCase(), policy: evaluateControlAction(req.actionId, "copilot", ctx) };
   }
 
+  // A conversational control request ("stop the machine", "set speed to
+  // 1400") is recognised, never executed — it is proposed to the Safety &
+  // Policy Guardrail exactly like a button-driven action, so the operator
+  // still has to authorize it before anything moves.
+  if (intent === "propose_control_action" && chatControl) {
+    const policy = evaluateControlAction(chatControl.actionId, "operator", ctx);
+    base.proposedAction = {
+      actionId: chatControl.actionId,
+      action: chatControl.action,
+      label: chatControl.action === "set_manual_values" ? "apply operator inputs" : chatControl.action.replace(/_/g, " "),
+      policy,
+      values: chatControl.values,
+    };
+    if (!policy.allowed) base.reply = `Not allowed right now: ${policy.reason}`;
+  }
+
   if (intent === "shift_handover") {
     base.handover = {
       state: base.reply,
@@ -408,8 +505,10 @@ export async function runCopilot(req: CopilotRequest, ctx: LiveContext): Promise
   }
 
   // Central-AI enrichment ONLY for the intents that genuinely need natural
-  // language. Everything else is answered by the edge engine above — no Groq call.
-  const CENTRAL = new Set<CopilotIntentName>(["ask", "explain_event", "show_root_cause", "shift_handover", "explain_component", "why_highlighted"]);
+  // language, multi-signal reasoning. General chat, telemetry lookups, status,
+  // summaries, SOP/golden-path/replay and control proposals are all answered
+  // deterministically above — no Groq call, no token cost, no latency.
+  const CENTRAL = new Set<CopilotIntentName>(["explain_event", "show_root_cause", "shift_handover", "explain_component", "why_highlighted"]);
   if (CENTRAL.has(intent) && hasLLM) {
     // Send only what the answer needs — related values, not the whole tag list.
     const relatedIds = new Set<string>([...(alarm?.relatedProcessValueIds ?? []), ...(dg.rootCause?.rationale ? [] : [])]);
@@ -421,11 +520,14 @@ export async function runCopilot(req: CopilotRequest, ctx: LiveContext): Promise
       mode: ctx.runtime.mode,
       operatorSetpoints: ctx.runtime.mode === "MANUAL" ? (ctx.__manualSetpoints ?? null) : null,
       workflow: req.workflow ?? null,
+      // last few turns only — enough to resolve "it" / "that" / a follow-up,
+      // not a full transcript.
+      recentConversation: history.slice(-6).map((t) => ({ who: t.role, said: t.text.slice(0, 240) })),
+      selectedComponent: req.componentLabel ?? dg.machineView.focusLabel ?? null,
       processValues: pvForLLM.map((p) => ({ label: p.label, value: p.value, unit: p.unit, status: p.status })),
       alarm: alarm ? { label: alarm.label, severity: alarm.severity, limit: alarm.limit, unit: alarm.unit } : null,
       edgeHypothesis: dg.rootCause ? { cause: dg.rootCause.cause, confidence: dg.rootCause.confidence, rationale: dg.rootCause.rationale } : null,
       recommendedAction: dg.recommendedAction?.text ?? null,
-      selectedComponent: req.componentLabel ?? dg.machineView.focusLabel ?? null,
     };
     const phrased = await phraseWithGroq(req.text || base.reply, snapshot);
     if (phrased) {

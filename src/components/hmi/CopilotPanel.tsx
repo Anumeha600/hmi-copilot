@@ -256,7 +256,7 @@ export function CopilotPanel() {
       {/* conversation */}
       {(conversation.length > 0 || copilotBusy) && (
         <div ref={logRef} className="flex max-h-44 flex-col gap-2 overflow-y-auto rounded-[6px] border border-hairline bg-surface-muted p-2.5">
-          {conversation.slice(-6).map((turn, i) => (
+          {conversation.slice(-8).map((turn, i) => (
             <div key={i} className={turn.role === "operator" ? "" : "rounded-[4px] bg-surface p-2"}>
               <div className={`mb-0.5 flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-[0.13em] ${turn.role === "operator" ? "text-ink-faint" : "text-accent-deep"}`}>
                 {turn.role === "operator" ? "Operator" : "AI Copilot"}
