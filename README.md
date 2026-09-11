@@ -1,3 +1,6 @@
+<img width="1600" height="758" alt="WhatsApp Image 2026-09-11 at 5 57 39 AM" src="https://github.com/user-attachments/assets/67f7bd6a-af21-4965-be9c-9b7a55beaf21" />
+<img width="1600" height="755" alt="WhatsApp Image 2026-09-11 at 5 58 00 AM" src="https://github.com/user-attachments/assets/ee342614-046b-4565-a302-8c06e45f8f65" />
+<img width="411" height="814" alt="WhatsApp Image 2026-09-11 at 5 58 24 AM" src="https://github.com/user-attachments/assets/7aeccf5b-e55a-490c-8a68-6e9629e9dfba" />
 # HMI Copilot
 
 ### AI-Powered Runtime HMI for Visualization, Investigation & Control of Industrial Machines
